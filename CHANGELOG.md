@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (2026-08-23)
+---
+ - Replace the retired email-link flow with Firebase email/password authentication and refresh-token rotation.
+ - Migrate backend requests to Clever mobile API v6.
+ - Read live home-charger state and active transactions from Cloud Firestore.
+ - Add config-entry migration and reauthentication for existing installations.
+ - Add mocked API/model tests and automated linting and compilation checks.
+
 ## 0.2.4.2 (2023-05-13)
 ---
  - Deleted a couple of unused fields in the UserInfoData model because of validation errors for some users. These fields were not at use in the integration.

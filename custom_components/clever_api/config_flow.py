@@ -1,237 +1,189 @@
-"""Config flow for Clever API"""
+"""Config flow for the Clever API integration."""
 
 from __future__ import annotations
 
-from urllib.parse import unquote
+import asyncio
+from typing import Any
 
-from typing import Any, Dict
 import voluptuous as vol
-
 from homeassistant import config_entries
-from homeassistant.const import CONF_EMAIL, CONF_API_KEY, CONF_API_TOKEN
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.data_entry_flow import ConfigFlowResult
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity_registry import (
-    async_entries_for_config_entry,
-    async_get,
-)
 
+from .clever.clever import CleverClient
+from .clever.exceptions import CleverAuthenticationError, CleverError
+from .clever.models import ChargingProfile, Installation, Profile
 from .const import (
+    CONF_BOX,
+    CONF_BOX_ID,
+    CONF_CHARGING_PROFILE_ID,
+    CONF_CONNECTOR_ID,
+    CONF_FIREBASE_UID,
+    CONF_REFRESH_TOKEN,
+    CONF_SUBSCRIPTION_FEE,
+    CONF_USER_ID,
     DOMAIN,
     LOGGER,
-    CONF_URL,
-    CONF_BOX,
-    CONF_USER_ID,
-    CONF_BOX_ID,
-    CONF_CONNECTOR_ID,
-    CONF_SUBSCRIPTION_FEE,
 )
 
-from .clever.clever import Auth, Subscription
+PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+)
 
-REAUTH = "reauth"
 
-EMAIL_SCHEMA = vol.Schema({vol.Required(CONF_EMAIL): str})
-URL_SCHEMA = vol.Schema({vol.Required(CONF_URL): str})
-BOX_SCHEMA = vol.Schema({vol.Required(CONF_BOX): bool})
-MISC_SCHEMA = vol.Schema({vol.Optional(CONF_SUBSCRIPTION_FEE, default=799): int})
-REAUTH_SCHEMA = vol.Schema({vol.Required(REAUTH): bool})
+def _credentials_schema(email: str | None = None) -> vol.Schema:
+    email_key = (
+        vol.Required(CONF_EMAIL, default=email)
+        if email is not None
+        else vol.Required(CONF_EMAIL)
+    )
+    return vol.Schema(
+        {
+            email_key: str,
+            vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
+            vol.Optional(CONF_SUBSCRIPTION_FEE, default=799): vol.Coerce(float),
+        }
+    )
 
 
 class CleverApiConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle Clever API config flow"""
+    """Handle Clever configuration and Firebase reauthentication."""
 
-    VERSION = 1
-
-    email: str
-    url: str
-    api_token: str
-    api_key: str
-    first_name: str
-    last_name: str
-    secret_code: str
-    user_secret: str
-    customer_id: str
-    add_box: bool
-    box_charge_id: int = None
-    box_connector_id: int = None
-    subscription_fee: float = None
-
-    def __init__(self) -> None:
-        """Initialize Clever API flow"""
-        self.device = None
+    VERSION = 2
 
     @staticmethod
     @callback
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
-    ) -> OptionsFlowHandler:
-        """Get the options flow for this handler."""
-        return OptionsFlowHandler(config_entry)
+    ) -> config_entries.OptionsFlow:
+        return CleverOptionsFlow(config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Define a Clever API device for config flow"""
-
-        errors = {}
-
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self.email = user_input[CONF_EMAIL]
-            session = async_get_clientsession(self.hass)
-
-            await Auth(session=session).send_auth_email(self.email)
-
-            return await self.async_step_url()
+            try:
+                data = await self._async_login(user_input)
+            except CleverAuthenticationError:
+                errors["base"] = "invalid_auth"
+            except CleverError:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001 - flow must convert unknown errors for UI
+                LOGGER.exception("Unexpected error while configuring Clever")
+                errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(data[CONF_USER_ID])
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(title=data[CONF_EMAIL], data=data)
 
         return self.async_show_form(
-            step_id="user", data_schema=EMAIL_SCHEMA, errors=errors
+            step_id="user", data_schema=_credentials_schema(), errors=errors
         )
 
-    async def async_step_url(
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Insert URL and setup integration."""
-
-        errors = {}
-
+    ) -> ConfigFlowResult:
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self.url = user_input[CONF_URL]
-            self.url = unquote(self.url)
-            # A bit hacky, but this does the trick.
-            # The url contains 2 urls. We only need the second
-            # url for this step.
-            self.url = self.url.partition("https") # Search for first https and cut everything in front off.
-            self.url = self.url[2].partition("https") # Search for https again in the new string.
-            self.url = self.url[1] + self.url[2] # partition split the string up in 3 parts. We need the first (https) and the second.
-            session = async_get_clientsession(self.hass)
-
-            auth = Auth(session=session)
-
-            resp = await auth.verify_link(auth_link=self.url, email=self.email)
-
-            self.first_name = resp.data["firstName"]
-            self.last_name = resp.data["lastName"]
-            self.secret_code = resp.secret_code
-
-            resp = await auth.obtain_user_secret(
-                email=self.email,
-                first_name=self.first_name,
-                last_name=self.last_name,
-                secret_code=self.secret_code,
+            user_input[CONF_SUBSCRIPTION_FEE] = entry.data.get(
+                CONF_SUBSCRIPTION_FEE, 799
             )
-            self.api_token = resp.data["userSecret"]
+            try:
+                data = await self._async_login(user_input)
+            except CleverAuthenticationError:
+                errors["base"] = "invalid_auth"
+            except CleverError:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001 - flow must convert unknown errors for UI
+                LOGGER.exception("Unexpected error while reauthenticating Clever")
+                errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(data[CONF_USER_ID])
+                self._abort_if_unique_id_mismatch(reason="wrong_account")
+                return self.async_update_reload_and_abort(entry, data_updates=data)
 
-            resp = await auth.obtain_api_token(
-                user_secret=self.api_token, email=self.email
-            )
-
-            self.api_key = resp.data
-
-            sub = Subscription(session=session, api_token=self.api_key)
-
-            user_data = await sub.get_user_info()
-
-            self.customer_id = user_data.data.customer_id
-
-            await self.async_set_unique_id(self.customer_id)
-
-            return await self.async_step_box()
-
-        return self.async_show_form(
-            step_id="url", data_schema=URL_SCHEMA, errors=errors
-        )
-
-    async def async_step_box(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Setup Clever EVSE"""
-
-        errors = {}
-
-        if user_input is not None:
-            self.add_box = user_input[CONF_BOX]
-            if self.add_box is True:
-                session = async_get_clientsession(self.hass)
-                sub = Subscription(session=session, api_token=self.api_key)
-                resp = await sub.get_evse_info()
-
-                self.box_charge_id = resp.data[0].charge_box_id
-                self.box_connector_id = resp.data[0].connector_id
-
-            return await self.async_step_misc()
-
-        return self.async_show_form(
-            step_id="box", data_schema=BOX_SCHEMA, errors=errors
-        )
-
-    async def async_step_misc(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle extra steps in setup"""
-
-        errors = {}
-
-        if user_input is not None:
-            self.subscription_fee = user_input[CONF_SUBSCRIPTION_FEE]
-
-            data = {
-                CONF_API_KEY: self.api_key,
-                CONF_API_TOKEN: self.api_token,
-                CONF_EMAIL: self.email,
-                CONF_USER_ID: self.customer_id,
-                CONF_BOX: self.add_box,
-                CONF_BOX_ID: self.box_charge_id,
-                CONF_CONNECTOR_ID: self.box_connector_id,
-                CONF_SUBSCRIPTION_FEE: self.subscription_fee,
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_EMAIL, default=entry.data.get(CONF_EMAIL)): str,
+                vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
             }
-
-            return self.async_create_entry(title=self.email, data=data)
-
+        )
         return self.async_show_form(
-            step_id="misc", data_schema=MISC_SCHEMA, errors=errors
+            step_id="reauth_confirm", data_schema=schema, errors=errors
         )
 
+    async def _async_login(self, user_input: dict[str, Any]) -> dict[str, Any]:
+        client = CleverClient(async_get_clientsession(self.hass))
+        await client.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
+        profile_data, installation_data, charging_profile_data = await asyncio.gather(
+            client.get_profile(),
+            client.get_installations(),
+            client.get_charging_profiles(),
+        )
+        profile = Profile.from_api(profile_data)
+        installations = [Installation.from_api(item) for item in installation_data]
+        charging_profiles = [
+            ChargingProfile.from_api(item) for item in charging_profile_data
+        ]
+        installation = installations[0] if installations else None
+        charging_profile = None
+        if installation:
+            charging_profile = next(
+                (item for item in charging_profiles if item.matches(installation)),
+                next(
+                    (
+                        item
+                        for item in charging_profiles
+                        if item.profile_type.casefold() == "home"
+                    ),
+                    None,
+                ),
+            )
+        return {
+            CONF_EMAIL: user_input[CONF_EMAIL],
+            CONF_REFRESH_TOKEN: client.refresh_token,
+            CONF_FIREBASE_UID: client.firebase_uid,
+            CONF_USER_ID: profile.customer_id,
+            CONF_BOX: installation is not None,
+            CONF_BOX_ID: installation.charge_box_id if installation else None,
+            CONF_CONNECTOR_ID: installation.connector_id if installation else None,
+            CONF_CHARGING_PROFILE_ID: (
+                charging_profile.profile_id if charging_profile else None
+            ),
+            CONF_SUBSCRIPTION_FEE: float(user_input.get(CONF_SUBSCRIPTION_FEE, 799)),
+        }
 
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for the component."""
+
+class CleverOptionsFlow(config_entries.OptionsFlow):
+    """Allow the subscription fee to be changed without reauthentication."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
-        self.options = config_entry.options
+        self._config_entry = config_entry
 
-    async def async_step_init(self, user_input: None = None) -> FlowResult:
-        """Manage options."""
-        return await self.async_step_reauth()
-
-    async def async_step_reauth(
+    async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage reauth."""
-        errors: dict[str, str] = {}
-
+    ) -> ConfigFlowResult:
         if user_input is not None:
-            if user_input[REAUTH] is True:
-                current_config = self.config_entry.data
-
-                session = async_get_clientsession(self.hass)
-
-                auth = Auth(session=session)
-
-                resp = await auth.obtain_api_token(
-                    user_secret=current_config[CONF_API_TOKEN],
-                    email=current_config[CONF_EMAIL],
-                )
-                LOGGER.debug(current_config[CONF_API_KEY])
-                new_config = current_config.copy()
-                new_config[CONF_API_KEY] = resp.data
-
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_config
-                )
-                return self.async_create_entry(title="", data={})
-
+            data = dict(self._config_entry.data)
+            data[CONF_SUBSCRIPTION_FEE] = float(user_input[CONF_SUBSCRIPTION_FEE])
+            self.hass.config_entries.async_update_entry(self._config_entry, data=data)
+            return self.async_create_entry(title="", data={})
         return self.async_show_form(
-            step_id="reauth", data_schema=REAUTH_SCHEMA, errors=errors
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_SUBSCRIPTION_FEE,
+                        default=self._config_entry.data.get(CONF_SUBSCRIPTION_FEE, 799),
+                    ): vol.Coerce(float)
+                }
+            ),
         )

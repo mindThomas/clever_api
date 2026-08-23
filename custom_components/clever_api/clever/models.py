@@ -1,181 +1,376 @@
-"""Async client for Clever API"""
+"""Typed models and parsers for the Clever mobile API."""
 
 from __future__ import annotations
-from typing import Any, Optional, List
-from datetime import datetime
 
-from pydantic import BaseModel, Field, Extra
-
-
-class CleverBase(BaseModel):
-    """Base object for all Clever backend requests"""
-
-    status: bool
-    status_message: str = Field(..., alias="statusMessage")
-    timestamp: str
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 
-class SendEmail(CleverBase):
-    """Object holding send_email data"""
+def parse_datetime(value: Any) -> datetime | None:
+    """Parse an API timestamp into an aware UTC datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        # Clever consumption timestamps are Unix microseconds.
+        return datetime.fromtimestamp(value / 1_000_000, tz=UTC)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    return None
 
 
-class VerifyLink(CleverBase):
-    """Object holding verify_email data"""
+@dataclass(frozen=True)
+class Profile:
+    """Clever customer profile."""
 
-    data: Any = None
-    secret_code: str
-
-
-class ObtainUserSecret(CleverBase):
-    """Object holding obtain_user_secret data"""
-
-    data: Any = None
-
-
-class ObtainApiToken(CleverBase):
-    """Object holding obtain_api_token data"""
-
-    data: Any = None
-
-
-class UserInfoData(BaseModel, extra=Extra.ignore):
-    """Object holding data of user info"""
-
-    firstname: str
-    lastname: str
+    customer_id: str
+    firebase_profile_id: str
     email: str
-    id: str
-    customer_id: str = Field(..., alias="customerId")
+    first_name: str
+    last_name: str
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Profile:
+        return cls(
+            customer_id=str(data.get("customerId") or data.get("id") or ""),
+            firebase_profile_id=str(data.get("id") or ""),
+            email=str(data.get("email") or ""),
+            first_name=str(data.get("firstname") or ""),
+            last_name=str(data.get("lastname") or ""),
+        )
 
 
-class UserInfo(CleverBase):
-    """Object holding user info."""
+@dataclass(frozen=True)
+class SmartChargingSettings:
+    """Smart-charging settings embedded in an installation response."""
 
-    data: UserInfoData
+    enabled: bool = False
+    supported: bool = False
+    departure_time: str | None = None
+    power_required: int | None = None
+    phase_count: int | None = None
+    preheat_minutes: int = 0
 
-
-class TransactionsDataRecords(BaseModel, extra=Extra.ignore):
-    """Object holding data of transactions"""
-
-    id: str
-    charge_point_id: str = Field(..., alias="chargePointId")
-    transaction_id: int = Field(..., alias="transactionId")
-    start_time_local: int = Field(..., alias="startTimeLocal")
-    stop_time_local: int = Field(..., alias="stopTimeLocal")
-    start_time_utc: int = Field(..., alias="startTimeUtc")
-    stop_time_utc: int = Field(..., alias="stopTimeUtc")
-    k_wh: float = Field(..., alias="kWh")
-
-
-class TransactionsData(BaseModel, extra=Extra.ignore):
-    """Object holding data of transactions"""
-
-    is_delta: bool = Field(..., alias="isDelta")
-    consumption_records: List[TransactionsDataRecords] = Field(
-        ..., alias="consumptionRecords"
-    )
-
-
-class Transactions(CleverBase):
-    """Object holding transactions"""
-
-    data: TransactionsData
+    @classmethod
+    def from_installation(cls, data: dict[str, Any]) -> SmartChargingSettings:
+        configuration = data.get("smartChargingConfiguration") or {}
+        user = configuration.get("userConfiguration") or {}
+        status = user.get("status") or {}
+        departure = user.get("departureTime") or {}
+        desired_range = user.get("desiredRange") or {}
+        effect = user.get("configuredEffect") or {}
+        return cls(
+            enabled=bool(
+                status.get("isEnabled", data.get("smartChargingIsEnabled", False))
+            ),
+            supported=bool(status.get("isSupported", False)),
+            departure_time=departure.get("time"),
+            power_required=_optional_int(desired_range.get("desiredRange")),
+            phase_count=_optional_int(effect.get("phaseCount")),
+            preheat_minutes=_optional_int(user.get("preheatInMinutes")) or 0,
+        )
 
 
-class ModTransactions(BaseModel):
-    """Object holding modified transactions."""
+@dataclass(frozen=True)
+class Installation:
+    """A Clever home charger installation."""
 
-    kwh_this_month: float
-    kwh_this_month_box: float | None
-    last_charge: datetime
-
-
-class EvseInfoDataSmartChargeUserConfig(BaseModel, extra=Extra.ignore):
-    """Object holding user configuration of smart charge"""
-
-    status: Any
-    car_category: str = Field(..., alias="carCategory")
-    departure_time: Any = Field(..., alias="departureTime")
-    desired_range: Any = Field(..., alias="desiredRange")
-    configured_effect: Any = Field(..., alias="configuredEffect")
-    preheat_in_minutes: Any = Field(..., alias="preheatInMinutes")
-    rules: List
-
-
-class EvseInfoDataSmartCharge(BaseModel, extra=Extra.ignore):
-    """Object holding user configuration of smart charge"""
-
-    user_configuration: EvseInfoDataSmartChargeUserConfig = Field(
-        ..., alias="userConfiguration"
-    )
-
-
-class EvseInfoData(BaseModel, extra=Extra.ignore):
-    """Object holding Evse data info"""
-
-    installation_id: str = Field(..., alias="installationId")
-    charge_box_id: str = Field(..., alias="chargeBoxId")
-    connector_id: int = Field(..., alias="connectorId")
-    smart_charging_is_enabled: bool = Field(..., alias="smartChargingIsEnabled")
-    smart_charging_version: str = Field(..., alias="smartChargingVersion")
-    smart_charging_data: Any = Field(..., alias="smartChargingData")
-    smart_charging_configuration: None | EvseInfoDataSmartCharge = Field(
-        ..., alias="smartChargingConfiguration"
-    )
-
-
-class EvseStateDataChargingPlanBoostStatus(BaseModel, extra=Extra.ignore):
-    """Object holding Evse data charging plan boost status"""
-
-    is_boosted: bool = Field(..., alias="isBoosted")
-    boosted_at: Any = Field(..., alias="boostedAt")
-    duration_in_minutes: Any = Field(..., alias="durationInMinutes")
-
-
-class EvseStateDataChargingPlan(BaseModel, extra=Extra.ignore):
-    """Object holding Evse data charging plan"""
-
-    boost_status: EvseStateDataChargingPlanBoostStatus = Field(..., alias="boostStatus")
-
-
-class EvseStateData(BaseModel, extra=Extra.ignore):
-    """Object holding Evse data"""
-
-    transaction_id: int = Field(..., alias="transactionId")
-    timestamp: str
+    installation_id: str
+    charge_box_id: str
+    connector_id: int
     status: str
-    consumed_wh: float = Field(..., alias="consumedWh")
-    started: str
-    postponed_until: None | str = Field(..., alias="postponedUntil")
-    so_c: int = Field(..., alias="soC")
-    charging_plan: None | EvseStateDataChargingPlan = Field(..., alias="chargingPlan")
+    is_online: bool
+    model: str | None
+    supports_locking: bool
+    smart_charging: SmartChargingSettings
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Installation:
+        charge_box_type = data.get("chargeBoxType") or {}
+        capabilities = data.get("capabilities") or {}
+        return cls(
+            installation_id=str(data.get("installationId") or ""),
+            charge_box_id=str(data.get("chargeBoxId") or ""),
+            connector_id=int(data.get("connectorId") or 0),
+            status=str(
+                data.get("detailedInstallationStatus")
+                or data.get("installationStatus")
+                or "Unknown"
+            ),
+            is_online=bool(data.get("isOnline", False)),
+            model=charge_box_type.get("name") or data.get("modelSeries"),
+            supports_locking=bool(capabilities.get("supportsLocking", False)),
+            smart_charging=SmartChargingSettings.from_installation(data),
+        )
 
 
-class EvseState(CleverBase):
-    """Object holding the state of EVSE state"""
+@dataclass(frozen=True)
+class ChargingProfile:
+    """Current v6 smart-charging profile."""
 
-    data: Optional[EvseStateData] = None
+    profile_id: str
+    profile_type: str
+    charge_points: tuple[tuple[str, int], ...]
+    enabled: bool
+    departure_time: str | None
+    power_required: int | None
+    preheat_minutes: int
+    happy_hour_enabled: bool
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> ChargingProfile:
+        points: list[tuple[str, int]] = []
+        for location in (data.get("filters") or {}).get("locations") or []:
+            for point in location.get("chargePoints") or []:
+                points.append(
+                    (str(point.get("id") or ""), int(point.get("connectorId") or 0))
+                )
+        settings = data.get("strategySettings") or {}
+        return cls(
+            profile_id=str(data.get("id") or ""),
+            profile_type=str(data.get("type") or ""),
+            charge_points=tuple(points),
+            enabled=not bool(settings.get("disabled", False)),
+            departure_time=settings.get("departureTime"),
+            power_required=_optional_int(settings.get("powerRequired")),
+            preheat_minutes=_optional_int(settings.get("preheatDurationMinutes")) or 0,
+            happy_hour_enabled=bool(settings.get("happyHourEnabled", False)),
+        )
+
+    def matches(self, installation: Installation) -> bool:
+        """Return whether this profile targets an installation connector."""
+        return (
+            installation.charge_box_id,
+            installation.connector_id,
+        ) in self.charge_points
 
 
-class EvseInfo(CleverBase):
-    """Object holding Evse info"""
+@dataclass(frozen=True)
+class ConsumptionRecord:
+    """Completed charging-session consumption."""
 
-    data: List[EvseInfoData]
+    charge_point_id: str
+    connector_id: int
+    start: datetime | None
+    stop: datetime | None
+    kwh: float
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> ConsumptionRecord:
+        return cls(
+            charge_point_id=str(data.get("chargePointId") or ""),
+            connector_id=int(data.get("connectorId") or 0),
+            start=parse_datetime(data.get("startTimeUtc")),
+            stop=parse_datetime(data.get("stopTimeUtc")),
+            kwh=float(data.get("kWh") or 0),
+        )
 
 
-class EvseFlexActivate(CleverBase):
-    """Object holding response when flex activated"""
+@dataclass(frozen=True)
+class ConsumptionSummary:
+    """Values exposed by the monthly consumption sensors."""
+
+    kwh_this_month: float = 0
+    kwh_this_month_box: float | None = None
+    last_charge: datetime | None = None
 
 
-class EnergitillaegData(BaseModel, extra=Extra.ignore):
-    """Object holding data of Energitillaeg."""
+def summarize_consumption(
+    records: list[ConsumptionRecord],
+    month_start: datetime,
+    charge_box_id: str | None = None,
+) -> ConsumptionSummary:
+    """Summarize consumption using the session start, matching existing behavior."""
+    current = [
+        record for record in records if record.start and record.start >= month_start
+    ]
+    total = sum(record.kwh for record in current)
+    box_total = None
+    if charge_box_id is not None:
+        box_total = sum(
+            record.kwh for record in current if record.charge_point_id == charge_box_id
+        )
+    stops = [record.stop for record in records if record.stop is not None]
+    return ConsumptionSummary(
+        kwh_this_month=round(total, 3),
+        kwh_this_month_box=round(box_total, 3) if box_total is not None else None,
+        last_charge=max(stops) if stops else None,
+    )
 
-    start_date: str = Field(..., alias="startDate")
-    end_date: str = Field(..., alias="endDate")
-    energy_surcharge_price_dkk: float = Field(..., alias="energySurchargePriceDkk")
+
+@dataclass(frozen=True)
+class EnergySurcharge:
+    """Estimated energy surcharge for the current month."""
+
+    start: datetime | None
+    end: datetime | None
+    price_dkk_per_kwh: float
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> EnergySurcharge:
+        return cls(
+            start=parse_datetime(data.get("startDate")),
+            end=parse_datetime(data.get("endDate")),
+            price_dkk_per_kwh=float(data.get("energySurchargePriceDkk") or 0),
+        )
 
 
-class Energitillaeg(CleverBase):
-    """Object holding energitillaeg object."""
+@dataclass(frozen=True)
+class ChargePointState:
+    """Live home-chargepoint state from Firestore."""
 
-    data: EnergitillaegData
+    charge_point_id: str
+    connector_id: int
+    status: str
+    last_seen: datetime | None
+    locked: bool | None
+
+    @classmethod
+    def from_firestore(cls, data: dict[str, Any]) -> ChargePointState:
+        return cls(
+            charge_point_id=str(data.get("chargePointId") or ""),
+            connector_id=int(data.get("connectorId") or 0),
+            status=str(data.get("status") or "Unknown"),
+            last_seen=parse_datetime(data.get("lastSeen")),
+            locked=data.get("locked") if isinstance(data.get("locked"), bool) else None,
+        )
+
+
+TERMINAL_TRANSACTION_STATES = {
+    "cancelled",
+    "completed",
+    "expired",
+    "failed",
+    "stopped",
+}
+
+
+@dataclass(frozen=True)
+class ActiveTransaction:
+    """A transaction document retained in the Firestore active collection."""
+
+    charge_point_id: str
+    connector_id: int
+    status: str
+    consumed_wh: float
+    timestamp: datetime | None
+    charging_end: datetime | None
+    charging_plan: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_firestore(cls, data: dict[str, Any]) -> ActiveTransaction:
+        return cls(
+            charge_point_id=str(data.get("chargePointId") or ""),
+            connector_id=int(data.get("connectorId") or 0),
+            status=str(data.get("cpmsChargingStatus") or "Unknown"),
+            consumed_wh=float(data.get("consumedWh") or 0),
+            timestamp=parse_datetime(data.get("timeStamp")),
+            charging_end=parse_datetime(data.get("chargingEnd")),
+            charging_plan=data.get("chargingPlan") or {},
+        )
+
+    @property
+    def is_active(self) -> bool:
+        return self.status.casefold() not in TERMINAL_TRANSACTION_STATES
+
+    def is_boosted_at(self, now: datetime) -> bool:
+        """Return whether a boost segment is active at ``now``."""
+        for segment in self.charging_plan.get("segments") or []:
+            reason = segment.get("reason") or {}
+            strategy = str(reason.get("strategy") or "").casefold()
+            sub_strategy = str(reason.get("substrategy") or "").casefold()
+            if strategy != "boost" and sub_strategy not in {"session", "timebox"}:
+                continue
+            start = parse_datetime(segment.get("start"))
+            end = parse_datetime(segment.get("end"))
+            if start and start <= now and (end is None or now < end):
+                return True
+        return False
+
+
+@dataclass(frozen=True)
+class CleverApiData:
+    """Coordinator snapshot consumed by Home Assistant entities."""
+
+    profile: Profile
+    installations: tuple[Installation, ...]
+    charging_profiles: tuple[ChargingProfile, ...]
+    consumption: ConsumptionSummary
+    surcharge: EnergySurcharge
+    chargepoint_states: tuple[ChargePointState, ...]
+    transactions: tuple[ActiveTransaction, ...]
+    subscription_fee: float
+
+    @property
+    def home_installation(self) -> Installation | None:
+        return self.installations[0] if self.installations else None
+
+    @property
+    def home_charging_profile(self) -> ChargingProfile | None:
+        installation = self.home_installation
+        if installation is None:
+            return None
+        return next(
+            (
+                profile
+                for profile in self.charging_profiles
+                if profile.matches(installation)
+            ),
+            next(
+                (
+                    profile
+                    for profile in self.charging_profiles
+                    if profile.profile_type.casefold() == "home"
+                ),
+                None,
+            ),
+        )
+
+    @property
+    def home_chargepoint_state(self) -> ChargePointState | None:
+        installation = self.home_installation
+        if installation is None:
+            return None
+        return next(
+            (
+                state
+                for state in self.chargepoint_states
+                if state.charge_point_id == installation.charge_box_id
+                and state.connector_id == installation.connector_id
+            ),
+            None,
+        )
+
+    @property
+    def active_home_transaction(self) -> ActiveTransaction | None:
+        installation = self.home_installation
+        if installation is None:
+            return None
+        candidates = [
+            transaction
+            for transaction in self.transactions
+            if transaction.is_active
+            and transaction.charge_point_id == installation.charge_box_id
+            and transaction.connector_id == installation.connector_id
+        ]
+        return max(
+            candidates,
+            key=lambda transaction: (
+                transaction.timestamp or datetime.min.replace(tzinfo=UTC)
+            ),
+            default=None,
+        )
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
