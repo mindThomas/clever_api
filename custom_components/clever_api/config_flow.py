@@ -7,9 +7,9 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import ConfigFlowResult
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -122,12 +122,24 @@ class CleverApiConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _async_login(self, user_input: dict[str, Any]) -> dict[str, Any]:
         client = CleverClient(async_get_clientsession(self.hass))
-        await client.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
-        profile_data, installation_data, charging_profile_data = await asyncio.gather(
-            client.get_profile(),
-            client.get_installations(),
-            client.get_charging_profiles(),
-        )
+        try:
+            await client.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
+        except CleverAuthenticationError as error:
+            LOGGER.warning("Firebase sign-in was rejected: %s", error)
+            raise
+        try:
+            (
+                profile_data,
+                installation_data,
+                charging_profile_data,
+            ) = await asyncio.gather(
+                client.get_profile(),
+                client.get_installations(),
+                client.get_charging_profiles(),
+            )
+        except CleverAuthenticationError as error:
+            LOGGER.warning("Clever API rejected the Firebase session: %s", error)
+            raise
         profile = Profile.from_api(profile_data)
         installations = [Installation.from_api(item) for item in installation_data]
         charging_profiles = [
