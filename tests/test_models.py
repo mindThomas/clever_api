@@ -97,6 +97,44 @@ class ModelTests(unittest.TestCase):
             transaction.is_boosted_at(datetime(2026, 8, 23, 19, tzinfo=UTC))
         )
 
+    def test_active_transaction_session_metrics(self) -> None:
+        transaction = ActiveTransaction.from_firestore(
+            {
+                "chargePointId": "box-1",
+                "connectorId": 1,
+                "cpmsChargingStatus": "Charging",
+                "consumedWh": 11000,
+                "chargingStart": "2026-08-23T18:00:00Z",
+                "smartChargingFlow": "SmartCharging",
+                "chargingPlan": {
+                    "powerRequiredInKwh": 22,
+                    "departureTime": "2026-08-24T06:00:00Z",
+                    "earliestFinishedAt": "2026-08-23T22:00:00Z",
+                    "postponedUntil": "2026-08-23T19:00:00Z",
+                },
+                "vehicleStateOfCharge": {
+                    "vehicleChargeState": {
+                        "batteryLevel": 54.5,
+                        "chargeLimit": 80,
+                        "isPluggedIn": True,
+                    }
+                },
+            }
+        )
+
+        now = datetime(2026, 8, 23, 20, tzinfo=UTC)
+        self.assertEqual(transaction.target_energy_kwh, 22)
+        self.assertEqual(transaction.progress_percent, 50)
+        self.assertEqual(transaction.duration_seconds_at(now), 7200)
+        self.assertEqual(transaction.average_power_kw_at(now), 5.5)
+        self.assertEqual(
+            transaction.expected_completion,
+            datetime(2026, 8, 23, 22, tzinfo=UTC),
+        )
+        self.assertEqual(transaction.battery_level, 54.5)
+        self.assertEqual(transaction.charge_limit, 80)
+        self.assertTrue(transaction.vehicle_is_plugged_in)
+
 
 if __name__ == "__main__":
     unittest.main()
