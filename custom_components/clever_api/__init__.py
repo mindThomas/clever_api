@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
+from .clever.migration import migrate_entity_unique_ids
 from .const import (
     CONF_CONFIG_ENTRY_ID,
     CONF_DEPT_TIME,
@@ -74,20 +75,13 @@ def _migrate_entity_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
 
     registry = er.async_get(hass)
-    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
-        new_unique_id = migrations.get(
-            (registry_entry.domain, registry_entry.unique_id)
-        )
-        if new_unique_id is None:
-            continue
-        if (
-            registry.async_get_entity_id(registry_entry.domain, DOMAIN, new_unique_id)
-            is not None
-        ):
-            continue
-        registry.async_update_entity(
-            registry_entry.entity_id, new_unique_id=new_unique_id
-        )
+    migrate_entity_unique_ids(
+        registry,
+        er.async_entries_for_config_entry(registry, entry.entry_id),
+        entry.entry_id,
+        DOMAIN,
+        migrations,
+    )
 
 
 def _coordinator_for_call(
