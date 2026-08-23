@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 (2026-08-24)
+---
+ - Fix config-flow loading on Home Assistant 2026.6.
+
 ## 0.3.0 (2026-08-23)
 ---
  - Replace the retired email-link flow with Firebase email/password authentication and refresh-token rotation.
