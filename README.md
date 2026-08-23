@@ -41,6 +41,10 @@ Accounts with a home charger additionally expose:
 
 - Energy this month on the home charger
 - Energy in the current charging session
+- Target energy and progress for the current charging session
+- Charging-session duration and average delivered power
+- Expected charging completion and vehicle battery level when available
+- Charging and vehicle-connected binary sensors
 - Live charger state
 - Intelligent-charging status and configuration attributes
 - Preheat switch
@@ -68,6 +72,11 @@ Live chargepoint state and transaction documents refresh every minute.
 - Clever may change the private mobile API without notice.
 - Control actions depend on an active and supported Clever home-charging
   profile.
+- The active-transaction API does not expose instantaneous charging power. The
+  power sensor is the session average calculated from delivered energy and
+  elapsed time; it must not be interpreted as the current charger output.
+
+See [API.md](API.md) for the observed mobile API and Firestore handles.
 
 Use this integration at your own risk and comply with the applicable Clever
 terms and account policies.

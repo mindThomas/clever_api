@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0 (2026-08-24)
+---
+ - Expose active charging, vehicle connection, target energy, progress, duration, average power, expected completion, and vehicle battery level.
+ - Document the observed Android mobile API and Firestore handles.
+
 ## 0.3.2 (2026-08-24)
 ---
  - Preserve existing entity IDs when migrating legacy entries.
