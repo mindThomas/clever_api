@@ -1,114 +1,100 @@
-"""Support for Clever API sensors."""
+"""Switch controls for Clever smart charging."""
 
 from __future__ import annotations
 
-from asyncio import sleep
-from collections.abc import Callable, Awaitable
-from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
-from homeassistant.components.switch import (
-    SwitchEntity,
-    SwitchEntityDescription,
-)
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, LOGGER
-from .coordinator import (
-    CleverApiEvseData,
-    CleverApiEvseUpdateCoordinator,
-)
-from .clever.clever import Evse
-from .entity import CleverApiEvseEntity
-
-
-@dataclass
-class CleverApiSwitchEvseEntityMixin:
-    """Mixin values for Clever API EVSE entities."""
-
-    is_on_fn: Callable[[CleverApiEvseData], bool | None]
-    set_fn: Callable[[Evse, bool], Awaitable[Any]]
-
-
-@dataclass
-class CleverApiSwitchEvseEntityDescription(
-    SwitchEntityDescription, CleverApiSwitchEvseEntityMixin
-):
-    """Class describing Clever API EVSE switch sensor entities."""
-
-
-SWITCHES = [
-    CleverApiSwitchEvseEntityDescription(
-        key="preheat",
-        name="Preheat",
-        icon="mdi:radiator",
-        is_on_fn=lambda x: False
-        if x.evse_info.data[0].smart_charging_is_enabled is False
-        else x.evse_info.data[
-            0
-        ].smart_charging_configuration.user_configuration.preheat_in_minutes
-        == 30,
-        set_fn=lambda client, enable: client.set_climate(enable=enable),
-    ),
-    CleverApiSwitchEvseEntityDescription(
-        key="skip_io",
-        name="Skip Intelligent Opladning",
-        icon="mdi:fast-forward",
-        is_on_fn=lambda x: False
-        if x.evse_info.data[0].smart_charging_is_enabled is False
-        or x.evse_state.data is None
-        else x.evse_state.data.charging_plan.boost_status.is_boosted,
-        set_fn=lambda client, enable: client.set_unlimited_boost(enable=enable),
-    ),
-]
+from .const import DOMAIN
+from .coordinator import CleverApiUpdateCoordinator
+from .entity import CleverApiEntity
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Setup Clever API switch from config entry."""
-    evse_coordinator: CleverApiEvseUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    async_add_entities(
-        CleverApiEvseSwitchEntity(
-            coordinator=evse_coordinator,
-            description=description,
+    coordinator: CleverApiUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    if coordinator.data.home_installation is not None:
+        async_add_entities(
+            [CleverPreheatSwitch(coordinator), CleverBoostSwitch(coordinator)]
         )
-        for description in SWITCHES
-    )
 
 
-class CleverApiEvseSwitchEntity(CleverApiEvseEntity, SwitchEntity):
-    """Representation of a Clever EVSE API switch sensor."""
+class CleverPreheatSwitch(CleverApiEntity, SwitchEntity):
+    """Enable or disable preheating in the home charging profile."""
 
-    entity_description: CleverApiSwitchEvseEntityDescription
+    _attr_name = "Preheat"
+    _attr_translation_key = "preheat"
+    _attr_icon = "mdi:radiator"
 
-    def __init__(
-        self,
-        coordinator: CleverApiEvseUpdateCoordinator,
-        description: CleverApiSwitchEvseEntityDescription,
-    ) -> None:
-        """Initiate Clever API switch"""
+    def __init__(self, coordinator: CleverApiUpdateCoordinator) -> None:
         super().__init__(coordinator)
-
-        self.entity_description = description
-        self._attr_unique_id = f"{description.key}"
+        self._attr_unique_id = f"{coordinator.data.profile.customer_id}_preheat"
 
     @property
     def is_on(self) -> bool:
-        """Return switch sensor value."""
-        return self.entity_description.is_on_fn(self.coordinator.data)
+        profile = self.coordinator.data.home_charging_profile
+        return bool(profile and profile.preheat_minutes > 0)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn entity on"""
-        await self.entity_description.set_fn(self.coordinator.evse, True)
-        await sleep(2)
-        await self.coordinator.async_refresh()
+        await self._set_preheat(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn entity off"""
-        await self.entity_description.set_fn(self.coordinator.evse, False)
-        await sleep(2)
-        await self.coordinator.async_refresh()
+        await self._set_preheat(False)
+
+    async def _set_preheat(self, enable: bool) -> None:
+        profile = self.coordinator.data.home_charging_profile
+        if profile is None:
+            raise HomeAssistantError("No Clever home charging profile is available")
+        await self.coordinator.client.set_preheat(profile.profile_id, enable)
+        await self.coordinator.async_refresh_configuration()
+
+
+class CleverBoostSwitch(CleverApiEntity, SwitchEntity):
+    """Temporarily bypass intelligent charging for the active session."""
+
+    _attr_name = "Skip intelligent charging"
+    _attr_translation_key = "boost"
+    _attr_icon = "mdi:fast-forward"
+
+    def __init__(self, coordinator: CleverApiUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.profile.customer_id}_boost"
+
+    @property
+    def is_on(self) -> bool:
+        transaction = self.coordinator.data.active_home_transaction
+        return bool(transaction and transaction.is_boosted_at(datetime.now(UTC)))
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.data.active_home_transaction is not None
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        installation = self.coordinator.data.home_installation
+        if installation is None:
+            raise HomeAssistantError("No Clever home charger is available")
+        await self.coordinator.client.boost(
+            installation.charge_box_id, installation.connector_id
+        )
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        installation = self.coordinator.data.home_installation
+        if installation is None:
+            raise HomeAssistantError("No Clever home charger is available")
+        await self.coordinator.client.unboost(
+            installation.charge_box_id, installation.connector_id
+        )
+        await self.coordinator.async_request_refresh()

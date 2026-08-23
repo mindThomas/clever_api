@@ -1,310 +1,348 @@
-"""Asynchronous Python client for Clever EV charger subscription and EV charger at home"""
+"""Asynchronous client for the current Clever Android app backends."""
+
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import quote
 
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, cast
-
-import async_timeout
-from aiohttp.client import ClientSession
-from aiohttp.hdrs import METH_GET, METH_POST
-from yarl import URL
+from aiohttp import ClientError, ClientSession
 
 from .exceptions import (
-    CleverError,
+    CleverApiError,
+    CleverAuthenticationError,
     CleverConnectionError,
 )
-from .models import (
-    SendEmail,
-    VerifyLink,
-    ObtainUserSecret,
-    ObtainApiToken,
-    UserInfo,
-    Transactions,
-    ModTransactions,
-    EvseInfo,
-    EvseState,
-    Energitillaeg,
-)
 
-from .urls import (
-    SEND_AUTH_EMAIL,
-    VERIFY_LINK,
-    OBTAIN_USER_SECRET,
-    OBTAIN_API_TOKEN,
-    GET_USER_INFO,
-    GET_TRANSACTIONS,
-    GET_EVSE_INFO,
-    GET_ENERGITILLAEG,
-    GET_EVSE_STATE,
-    SET_FLEX_ON,
-    SET_FLEX_OFF,
-    SET_CLIMATE_ON,
-    SET_CLIMATE_OFF,
-    SET_UNLIMITED_BOOST,
-    SET_TIMED_BOOST,
-    DISABLE_BOOST,
-    SET_KWH,
-    SET_DEPT_TIME,
-)
+API_BASE = "https://mobileapp-backend.clever.dk/api/v6/"
+FIREBASE_API_KEY = "AIzaSyAQpjnGi6Tvk_sO9JFdS5Hj2NBuIEIAZjo"
+FIREBASE_PROJECT = "clever-app-prod"
+FIRESTORE_DATABASE = "user-database"
+ANDROID_PACKAGE = "dk.clever.app"
+ANDROID_CERT = "2B187B6CBA980988B235ED26BF755FEE7C1E0A43"
+APP_VERSION = "26.33.0"
+STATIC_API_KEY = "Basic bW9iaWxlYXBwOmFwaWtleQ=="
+
+TokenUpdateCallback = Callable[[str, str], None]
 
 
-@dataclass
-class Clever:
-    """Class for handling connection with Clever backend"""
+class CleverClient:
+    """Firebase-authenticated Clever REST and Firestore client."""
 
-    request_timeout: int = 10
-    session: ClientSession | None = None
-    _close_session: bool = False
-
-    async def _request(
+    def __init__(
         self,
-        url: str,
-        method: str = METH_GET,
-        data: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Handle request to Clever backend"""
+        session: ClientSession,
+        *,
+        refresh_token: str | None = None,
+        firebase_uid: str | None = None,
+        request_timeout: int = 30,
+        token_update_callback: TokenUpdateCallback | None = None,
+    ) -> None:
+        self._session = session
+        self._refresh_token = refresh_token
+        self._firebase_uid = firebase_uid
+        self._request_timeout = request_timeout
+        self._token_update_callback = token_update_callback
+        self._id_token: str | None = None
+        self._token_expires_at = 0.0
+        self._refresh_lock = asyncio.Lock()
 
-        headers = {'content-type': 'application/json', 'accept': '*/*', 'authorization': 'Basic bW9iaWxlYXBwOmFwaWtleQ==', 'app-version': '3.8.1', 'app-os': '17.0', 'app-platform': 'iOS', 'app-device': 'iPhone12,1', 'accept-language': 'da-DK,da;q=0.9', 'x-api-key': 'Basic bW9iaWxlYXBwOmFwaWtleQ==', 'user-agent': 'Clever/2 CFNetwork/1474 Darwin/23.0.0'}
+    @property
+    def refresh_token(self) -> str | None:
+        return self._refresh_token
 
-        if self.session is None:
-            self.session = ClientSession()
-            self._close_session = True
+    @property
+    def firebase_uid(self) -> str | None:
+        return self._firebase_uid
 
+    async def login(self, email: str, password: str) -> None:
+        """Sign in with Firebase email/password authentication."""
+        payload = await self._request_json(
+            "POST",
+            "https://identitytoolkit.googleapis.com/v1/"
+            f"accounts:signInWithPassword?key={FIREBASE_API_KEY}",
+            headers=self._firebase_headers,
+            json={"email": email, "password": password, "returnSecureToken": True},
+            authentication_request=True,
+        )
+        self._set_tokens(payload)
+
+    async def refresh_authentication(self, *, force: bool = False) -> None:
+        """Exchange the saved Firebase refresh token for an ID token."""
+        if not force and self._id_token and time.monotonic() < self._token_expires_at:
+            return
+        async with self._refresh_lock:
+            if (
+                not force
+                and self._id_token
+                and time.monotonic() < self._token_expires_at
+            ):
+                return
+            if not self._refresh_token:
+                raise CleverAuthenticationError(
+                    "No Firebase refresh token is available"
+                )
+            payload = await self._request_json(
+                "POST",
+                f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}",
+                headers=self._firebase_headers,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self._refresh_token,
+                },
+                authentication_request=True,
+            )
+            self._set_tokens(payload)
+
+    async def get_profile(self) -> dict[str, Any]:
+        return await self._clever_data("GET", "profiles/get-profile")
+
+    async def get_installations(self) -> list[dict[str, Any]]:
+        return await self._clever_data("GET", "installations")
+
+    async def get_consumption_history(self) -> list[dict[str, Any]]:
+        data = await self._clever_data("GET", "consumption/history")
+        return list(data.get("consumptionRecords") or [])
+
+    async def get_energy_surcharge(self) -> dict[str, Any]:
+        return await self._clever_data("GET", "energysurcharge/estimated")
+
+    async def get_charging_profiles(self) -> list[dict[str, Any]]:
+        return await self._clever_data("GET", "chargingprofiles")
+
+    async def get_home_chargepoints(self) -> list[dict[str, Any]]:
+        return await self._firestore_collection("home-chargepoints")
+
+    async def get_active_transactions(self) -> list[dict[str, Any]]:
+        return await self._firestore_collection("active-transactions")
+
+    async def set_charging_profile_enabled(self, profile_id: str, enable: bool) -> None:
+        await self._clever_request(
+            "PUT",
+            f"chargingprofiles/{quote(profile_id, safe='')}/enable",
+            json={"enable": enable},
+        )
+
+    async def set_departure_time(self, profile_id: str, departure_time: str) -> None:
+        await self._clever_request(
+            "PUT",
+            f"chargingprofiles/{quote(profile_id, safe='')}/departure-time",
+            json={"departureTime": departure_time},
+        )
+
+    async def set_power_required(self, profile_id: str, power_required: int) -> None:
+        await self._clever_request(
+            "PUT",
+            f"chargingprofiles/{quote(profile_id, safe='')}/power-required",
+            json={"powerRequired": power_required},
+        )
+
+    async def set_preheat(self, profile_id: str, enable: bool) -> None:
+        await self._clever_request(
+            "PUT",
+            f"chargingprofiles/{quote(profile_id, safe='')}/preheat",
+            json={"enable": enable},
+        )
+
+    async def boost(self, charge_point_id: str, connector_id: int) -> None:
+        await self._clever_request(
+            "POST",
+            "smartcharging/chargePoints/"
+            f"{quote(charge_point_id, safe='')}/connectors/{connector_id}/boost",
+        )
+
+    async def timebox_boost(
+        self, charge_point_id: str, connector_id: int, duration_minutes: int
+    ) -> None:
+        await self._clever_request(
+            "POST",
+            "smartcharging/chargePoints/"
+            f"{quote(charge_point_id, safe='')}/connectors/{connector_id}/timebox-boost",
+            params={"durationInMinutes": duration_minutes},
+        )
+
+    async def unboost(self, charge_point_id: str, connector_id: int) -> None:
+        await self._clever_request(
+            "POST",
+            "smartcharging/chargePoints/"
+            f"{quote(charge_point_id, safe='')}/connectors/{connector_id}/unboost",
+        )
+
+    @property
+    def _firebase_headers(self) -> dict[str, str]:
+        return {
+            "X-Android-Package": ANDROID_PACKAGE,
+            "X-Android-Cert": ANDROID_CERT,
+        }
+
+    def _set_tokens(self, payload: dict[str, Any]) -> None:
+        id_token = payload.get("idToken") or payload.get("id_token")
+        refresh_token = payload.get("refreshToken") or payload.get("refresh_token")
+        firebase_uid = payload.get("localId") or payload.get("user_id")
+        if not id_token or not refresh_token or not firebase_uid:
+            raise CleverAuthenticationError(
+                "Firebase returned an incomplete token response"
+            )
+        self._id_token = str(id_token)
+        self._refresh_token = str(refresh_token)
+        self._firebase_uid = str(firebase_uid)
+        expires_in = int(payload.get("expiresIn") or payload.get("expires_in") or 3600)
+        self._token_expires_at = time.monotonic() + max(0, expires_in - 60)
+        if self._token_update_callback:
+            self._token_update_callback(self._refresh_token, self._firebase_uid)
+
+    async def _clever_data(self, method: str, path: str, **kwargs: Any) -> Any:
+        payload = await self._clever_request(method, path, **kwargs)
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise CleverApiError(200, "Clever returned an invalid response wrapper")
+        return payload["data"]
+
+    async def _clever_request(
+        self, method: str, path: str, *, _retry: bool = True, **kwargs: Any
+    ) -> Any:
+        await self.refresh_authentication()
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._id_token}",
+            "x-api-key": STATIC_API_KEY,
+            "App-Version": APP_VERSION,
+            "App-Platform": "Android",
+            "App-OS": "16",
+            "App-Device": "Home Assistant",
+            "Accept-Language": "da-DK",
+            "User-Agent": f"dk.clever.core.network/{APP_VERSION}",
+        }
         try:
-            async with async_timeout.timeout(self.request_timeout):
-                response = await self.session.request(
+            payload = await self._request_json(
+                method, API_BASE + path, headers=headers, **kwargs
+            )
+        except CleverAuthenticationError:
+            if not _retry:
+                raise
+            await self.refresh_authentication(force=True)
+            return await self._clever_request(method, path, _retry=False, **kwargs)
+        if isinstance(payload, dict) and payload.get("status") is False:
+            raise CleverApiError(
+                200, str(payload.get("statusMessage") or "Clever request failed")
+            )
+        return payload
+
+    async def _firestore_collection(
+        self, collection: str, *, _retry: bool = True
+    ) -> list[dict[str, Any]]:
+        await self.refresh_authentication()
+        if not self._firebase_uid:
+            raise CleverAuthenticationError("Firebase user ID is unavailable")
+        url = (
+            "https://firestore.googleapis.com/v1/projects/"
+            f"{FIREBASE_PROJECT}/databases/{FIRESTORE_DATABASE}/documents/"
+            f"v1-user-data/{quote(self._firebase_uid, safe='')}/{collection}"
+        )
+        try:
+            payload = await self._request_json(
+                "GET", url, headers={"Authorization": f"Bearer {self._id_token}"}
+            )
+        except CleverAuthenticationError:
+            if not _retry:
+                raise
+            await self.refresh_authentication(force=True)
+            return await self._firestore_collection(collection, _retry=False)
+        documents: list[dict[str, Any]] = []
+        for document in payload.get("documents") or []:
+            decoded = {
+                key: decode_firestore_value(value)
+                for key, value in (document.get("fields") or {}).items()
+            }
+            decoded["_document_name"] = document.get("name")
+            documents.append(decoded)
+        return documents
+
+    async def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json: Any | None = None,
+        data: Any | None = None,
+        params: dict[str, Any] | None = None,
+        authentication_request: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(self._request_timeout):
+                async with self._session.request(
                     method,
                     url,
-                    json=data,
                     headers=headers,
-                )
-                response.raise_for_status()
-        except asyncio.TimeoutError as exception:
-            msg = "Timeout while connecting to Clever backend"
-            raise CleverConnectionError(msg) from exception
+                    json=json,
+                    data=data,
+                    params=params,
+                ) as response:
+                    if response.status == 204:
+                        payload: Any = {}
+                    else:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except (ValueError, TypeError):
+                            payload = {}
+                    if response.status in {400, 401, 403} and authentication_request:
+                        raise CleverAuthenticationError(_error_message(payload))
+                    if response.status == 401:
+                        raise CleverAuthenticationError(_error_message(payload))
+                    if response.status >= 400:
+                        raise CleverApiError(response.status, _error_message(payload))
+                    if not isinstance(payload, dict):
+                        raise CleverApiError(
+                            response.status, "Backend returned non-object JSON"
+                        )
+                    return payload
+        except (TimeoutError, ClientError) as error:
+            raise CleverConnectionError("Unable to reach the Clever backend") from error
 
-        return cast(dict[str, Any], await response.json())
 
-    async def close(self) -> None:
-        """Close client session."""
-
-        if self.session and self._close_session:
-            await self.session.close()
-
-    async def __aenter__(self) -> Clever:
-        """Async enter."""
-
-        return self
-
-    async def __aexit__(self, *_exc_inf: Any) -> None:
-        """Async exit."""
-
-        await self.close()
-
-
-class Auth(Clever):
-    """Handles Clever API auth process"""
-
-    async def send_auth_email(self, email: str) -> SendEmail:
-        """Request a verify login email from Clever"""
-        url = eval('f"'+SEND_AUTH_EMAIL+'"')
-        resp = await self._request(url)
-        return SendEmail.parse_obj(resp)
-
-    async def verify_link(self, auth_link: str, email: str) -> VerifyLink:
-        """Obtain secretCode send to email."""
-        secret_code = URL(auth_link).query["secretCode"]
-        url = eval('f"'+VERIFY_LINK+'"')
-
-        resp = await self._request(url)
-        resp["secret_code"] = secret_code
-        model = VerifyLink.parse_obj(resp)
-        if model.data["result"] != "Verified":
-            msg = model.data["result"]
-            raise CleverError(msg)
-        return model
-
-    async def obtain_user_secret(
-        self, email: str, first_name: str, last_name: str, secret_code: str
-    ) -> ObtainUserSecret:
-        """Exchange secret_code for user_secret."""
-        
-        url = eval('f"'+OBTAIN_USER_SECRET+'"')
-        payload = {
-            "email": email,
-            "firstName": first_name,
-            "lastName": last_name,
-            "token": secret_code,
+def decode_firestore_value(value: dict[str, Any]) -> Any:
+    """Decode a value from the Firestore REST wire representation."""
+    if "nullValue" in value:
+        return None
+    if "booleanValue" in value:
+        return bool(value["booleanValue"])
+    if "integerValue" in value:
+        return int(value["integerValue"])
+    if "doubleValue" in value:
+        return float(value["doubleValue"])
+    if "timestampValue" in value:
+        return value["timestampValue"]
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "bytesValue" in value:
+        return value["bytesValue"]
+    if "referenceValue" in value:
+        return value["referenceValue"]
+    if "geoPointValue" in value:
+        return dict(value["geoPointValue"])
+    if "arrayValue" in value:
+        return [
+            decode_firestore_value(item)
+            for item in value["arrayValue"].get("values", [])
+        ]
+    if "mapValue" in value:
+        return {
+            key: decode_firestore_value(item)
+            for key, item in value["mapValue"].get("fields", {}).items()
         }
-        resp = await self._request(url, method=METH_POST, data=payload)
-        model = ObtainUserSecret.parse_obj(resp)
-        if model.data["userSecret"] == "null":
-            msg = model.data["verificationResponse"]["result"]
-            raise CleverError(msg)
-        return model
-
-    async def obtain_api_token(self, user_secret: str, email: str):
-        """Exchange user_secret for api_token."""
-
-        url = eval('f"'+OBTAIN_API_TOKEN+'"')
-        resp = await self._request(url)
-        model = ObtainApiToken.parse_obj(resp)
-        if model.data is None:
-            msg = model.statusMessage
-            raise CleverError(msg)
-        return model
+    return None
 
 
-@dataclass
-class Subscription(Clever):
-    """Dataclass representing a Clever subscription."""
-
-    api_token: str = None
-
-    async def get_user_info(self) -> UserInfo:
-        """Get info of user"""
-
-        url = eval('f"'+GET_USER_INFO+'"')
-        resp = await self._request(url)
-        model = UserInfo.parse_obj(resp)
-        return model
-
-    async def get_transactions(self, box_id=None) -> Transactions:
-        """Get charging transactions"""
-
-        url = eval('f"'+GET_TRANSACTIONS+'"')
-        resp = await self._request(url)
-        model = Transactions.parse_obj(resp)
-        today = datetime.today()
-        start_of_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        start_of_month_in_ms = start_of_month.timestamp() * 1_000_000
-        kwh_this_month = 0
-        for item in model.data.consumption_records:
-            if item.start_time_utc >= start_of_month_in_ms:
-                kwh_this_month += item.k_wh
-        last_registered_transaction = datetime.fromtimestamp(
-            (model.data.consumption_records[-1].stop_time_local) / 1_000_000
+def _error_message(payload: Any) -> str:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or "Authentication failed")
+        if isinstance(error, str):
+            return error
+        return str(
+            payload.get("statusMessage") or payload.get("message") or "Request failed"
         )
-
-        if box_id is not None:
-            kwh_this_month_box = 0
-            for item in model.data.consumption_records:
-                if item.start_time_utc >= start_of_month_in_ms:
-                    if item.charge_point_id == box_id:
-                        kwh_this_month_box += item.k_wh
-
-            return_model = ModTransactions.parse_obj(
-                {
-                    "kwh_this_month": kwh_this_month,
-                    "kwh_this_month_box": kwh_this_month_box,
-                    "last_charge": last_registered_transaction,
-                }
-            )
-
-            return return_model
-
-        return_model = ModTransactions.parse_obj(
-            {
-                "kwh_this_month": kwh_this_month,
-                "kwh_this_month_box": None,
-                "last_charge": last_registered_transaction,
-            }
-        )
-
-        return return_model
-
-    async def get_evse_info(self) -> EvseInfo:
-        """Get info about EVSE"""
-        url = eval('f"'+GET_EVSE_INFO+'"')
-        resp = await self._request(url)
-        model = EvseInfo.parse_obj(resp)
-        return model
-
-    async def get_energitillaeg(self) -> Energitillaeg:
-        """Get energitillaeg."""
-        url = eval('f"'+GET_ENERGITILLAEG+'"')
-        resp = await self._request(url)
-        model = Energitillaeg.parse_obj(resp)
-        return model
-
-
-@dataclass
-class Evse(Clever):
-    """Dataclass for communication with home charge box."""
-
-    api_token: str = None
-    box_id: int = None
-    connector_id: int = None
-
-    async def get_evse_state(self) -> EvseState:
-        """Get state of EVSE"""
-        url = eval('f"'+GET_EVSE_STATE+'"')
-        resp = await self._request(url)
-        model = EvseState.parse_obj(resp)
-        return model
-
-    async def set_flex(
-        self, enable: bool, effect: int = None, dept_time: str = None, kwh: int = None
-    ) -> None:
-        """Enable or disable flex charging"""
-        if enable is True:
-            url = eval('f"'+SET_FLEX_ON+'"')
-            data = {
-                "configuredEffect": {"phaseCount": effect},
-                "departureTime": {"time": dept_time},
-                "desiredRange": {"range": kwh},
-            }
-
-            resp = await self._request(url, method=METH_POST, data=data)
-
-            return resp
-        else:
-            url = eval('f"'+SET_FLEX_OFF+'"')
-            data = {"enable": False}
-
-            await self._request(url, method=METH_POST, data=data)
-
-    async def set_climate(self, enable: bool = None) -> None:
-        """Set climate start"""
-        if enable is True:
-            url = eval('f"'+SET_CLIMATE_ON+'"')
-            await self._request(url, method=METH_POST)
-        else:
-            url = eval('f"'+SET_CLIMATE_OFF+'"')
-            await self._request(url, method=METH_POST)
-
-    async def set_unlimited_boost(self, enable: bool = None) -> None:
-        """Skip smart charging for this session"""
-        if enable is True:
-            url = eval('f"'+SET_UNLIMITED_BOOST+'"')
-            await self._request(url, method=METH_POST)
-        else:
-            await self.disable_boost()
-
-    async def set_timed_boost(self) -> None:
-        """Skip smart charging for 30 minutes"""
-
-        url = eval('f"'+SET_TIMED_BOOST+'"')
-        await self._request(url, method=METH_POST)
-
-    async def disable_boost(self) -> None:
-        """Return to smart charging."""
-
-        url = eval('f"'+DISABLE_BOOST+'"')
-        await self._request(url, method=METH_POST)
-
-    async def set_kwh(self, kwh: int = None) -> None:
-        """Set kWh need for smart charging"""
-
-        url = eval('f"'+SET_KWH+'"')
-        data = {"range": kwh}
-        await self._request(url, method=METH_POST, data=data)
-
-    async def set_dept_time(self, dept_time: str = None) -> None:
-        """Set depature time for smart charging in format HH:MM"""
-        url = eval('f"'+SET_DEPT_TIME+'"')
-        data = {"time": dept_time}
-        await self._request(url, method=METH_POST, data=data)
+    return "Request failed"

@@ -1,40 +1,60 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "title": "Send Clever authorization email",
-                "data": {
-                    "email": "Email"
-                }
-            },
-            "url": {
-                "title": "Insert confirmation url from Clever",
-                "data": {
-                    "url": "URL"
-                }
-            },
-            "box": {
-                "title": "Clever Home Charger",
-                "data": {
-                    "box": "Add a Clever Home Charger?"
-                }
-            },
-            "misc": {
-                "title": "Clever subscription fee",
-                "data": {
-                    "subscription_fee": "Insert fee"
-                }
-            }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Clever",
+        "description": "Create or migrate your account in the Clever app before connecting it to Home Assistant.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "subscription_fee": "Monthly subscription fee"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect to Clever",
+        "description": "Enter your current Clever app credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
     },
-    "options": {
-        "step": {
-            "reauth": {
-                "title": "Reauth Clever",
-                "data": {
-                    "reauth": "Reauthenticate to Clever?"
-                }
-            }
-        }
+    "error": {
+      "cannot_connect": "Unable to connect to Clever",
+      "invalid_auth": "Invalid email or password",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This Clever account is already configured",
+      "reauth_successful": "Clever authentication was updated",
+      "wrong_account": "The credentials belong to a different Clever account"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Clever options",
+        "data": {
+          "subscription_fee": "Monthly subscription fee"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "energy_this_month": {"name": "Energy this month"},
+      "energy_surcharge": {"name": "Energy surcharge"},
+      "estimated_price": {"name": "Estimated total price this month"},
+      "energy_this_month_home": {"name": "Energy this month on home charger"},
+      "current_session_energy": {"name": "Energy this charging session"},
+      "charger_state": {"name": "State of charger"}
+    },
+    "binary_sensor": {
+      "intelligent_charging": {"name": "Intelligent charging"}
+    },
+    "switch": {
+      "preheat": {"name": "Preheat"},
+      "boost": {"name": "Skip intelligent charging"}
+    }
+  }
 }

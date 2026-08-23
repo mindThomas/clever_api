@@ -1,93 +1,73 @@
-
 # Clever API
 
-## All API endpoints has been removed on request from Clever A/S  See issue https://github.com/fars-fede-fire/CleverAPI/issues/1
+Unofficial Home Assistant custom integration for Clever subscriptions and home
+chargers. This project is not affiliated with or supported by Clever A/S.
 
-Home Assistant custom component for Clever EV charger
+The integration follows the API used by the current Clever Android app:
 
+- Firebase email/password authentication and refresh tokens
+- Clever mobile backend API v6
+- Cloud Firestore live home-charger state and active transactions
 
+## Prerequisite
 
-First flow screen is your Clever email
+Create or migrate your Clever account in the official Clever app first. Account
+creation, email verification, SMS verification, and CRM claim migration are not
+implemented in this integration.
 
-Second flow screen is is the conformation URL.
+## Installation and login
 
+Install the repository through HACS as a custom repository, restart Home
+Assistant, and add **Clever API** from **Settings → Devices & services**.
 
+Enter the email and password used in the Clever app. The password is used for
+the initial Firebase login and is not stored in the Home Assistant config entry.
+Home Assistant stores the resulting Firebase refresh token, which must be
+treated as a sensitive credential.
 
-Unofficial Clever API
+Existing version 0.2 entries are migrated to the new entry format and prompt
+for reauthentication because the former email-link token cannot be converted
+to a Firebase refresh token.
 
-I take no responsibility in using this custom component
+## Entities
 
+All accounts expose:
 
+- Energy this month
+- Energy surcharge
+- Estimated total price this month
 
-This is a beta release - a lot of work is still to be done!
+Accounts with a home charger additionally expose:
 
-To get the content for the urls.py file, you can use something like mitmproxy to sniff the urls
+- Energy this month on the home charger
+- Energy in the current charging session
+- Live charger state
+- Intelligent-charging status and configuration attributes
+- Preheat switch
+- Skip-intelligent-charging (boost) switch
 
-### TODO:
+## Actions
 
+- `clever_api.enable_flex` updates required energy and departure time, then
+  enables the home charging profile.
+- `clever_api.disable_flex` disables the home charging profile.
 
-- &#9745; Reauth
+The legacy `phase_count` input remains accepted for automation compatibility,
+but API v6 does not expose a corresponding charging-profile setting.
 
+## Update intervals
 
+Consumption, surcharge, installations, and charging profiles refresh hourly.
+Live chargepoint state and transaction documents refresh every minute.
 
-Expect breaking changes
+## Limitations
 
+- Only the first home installation is currently represented.
+- Monthly consumption is attributed to the month in which a charging session
+  started, matching the earlier integration behavior.
+- Clever may change the private mobile API without notice.
+- Control actions depend on an active and supported Clever home-charging
+  profile.
 
-
-
-### Entities
-
-Entity | Type | Description
--- | -- | --
-`sensor.clever_energitillaeg` | Sensor | Energitillæg for this month fetched from Clevers server.
-`sensor.clever_energy_this_month` | Sensor | Accumulated kWh this month. Be aware that it counts from when charger is plugged in, not precise when charging over night at shift in month.
-`sensor.clever_estimated_total_price_this_month` | Sensor | Estimated price for energitillæg this month (energitillæg * total consumption this month).
-
-
-### Entities with home charger
-Entity | Type | Description
--- | -- | --
-`sensor.clever_energitillaeg` | Sensor | Energitillæg for this month fetched from Clevers server.
-`sensor.clever_energy_this_month` | Sensor | Accumulated kWh this month. Be aware that it counts from when charger is plugged in, not precise when charging over night at shift in month.
-`sensor.clever_estimated_total_price_this_month` | Sensor | Estimated price for energitillæg this month (energitillæg * total consumption this month).
-`sensor.clever_energy_this_month_on_box` | Sensor | Accumulated kWh this month from home charger. Be aware that it counts from when charger is plugged in, not precise when charging over night at shift in month.
-`sensor.clever_energy_this_charging_session` | Sensor | Amount of charged kWh since car was connect. Update approximately every 5 minutes. Is 0 when unplugged.
-`sensor.clever_state_of_charger` | Sensor | Current state of the charger.
-`binary_sensor.clever_intelligent_opladning` | Binary sensor | Intelligent opladning turned on or off.
-`switch.clever_preheat` | Switch | Allow preheat when Intelligent opladning is turned on.
-`switch.clever_skip_intelligent_opladning` | Switch | Skip Intelligent opladning for this session or until turned off.
-
-### Services with home charger
-Service| Data| Description
--- | -- | --
-`clever_api.enable_flex` | depature_time: format "hh:mm", desired_range: integer in kWh, phase_count: integer in available phases | Setup Intelligent opladning.
-`clever_api.disable_flex` | None| Disable Intelligent opladning.
-
-Login flow:
-
-
-
-1) Insert your Clever email
-
-![Login picture 1](https://github.com/fars-fede-fire/clever_api/blob/main/cleverfoto/login1.PNG)
-
-Press 'send'
-
-
-
-2) You will now recieve a email from Clever asking you to confirm login. Open this email and press the 'bekræft' button
-
-![Login picture 2](https://github.com/fars-fede-fire/clever_api/blob/main/cleverfoto/clevermail.PNG)
-
-
-
-3) Copy the URL
-
-![Login picture 3](https://github.com/fars-fede-fire/clever_api/blob/main/cleverfoto/cleverurl.PNG)
-
-
-
-4) Insert your Clever mail again and paste the URL
-
-![Login picture 4](https://github.com/fars-fede-fire/clever_api/blob/main/cleverfoto/login2.PNG)
-
+Use this integration at your own risk and comply with the applicable Clever
+terms and account policies.

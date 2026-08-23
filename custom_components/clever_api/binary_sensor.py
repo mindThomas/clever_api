@@ -1,119 +1,74 @@
-"""Support for Clever API sensors."""
+"""Binary sensors for Clever smart charging."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
-from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
-    BinarySensorEntityDescription,
-)
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, LOGGER
-from .coordinator import (
-    CleverApiEvseData,
-    CleverApiEvseUpdateCoordinator,
-)
-from .entity import CleverApiEvseEntity
-
-
-@dataclass
-class CleverApiBinarySensorEvseEntityMixin:
-    """Mixin values for Clever API EVSE entities."""
-
-    value_fn: Callable[[CleverApiEvseData], Any]
-    attrs: Dict[str, Callable[[CleverApiEvseData], Any]]
-
-
-@dataclass
-class CleverApiBinarySensorEvseEntityDescription(
-    BinarySensorEntityDescription, CleverApiBinarySensorEvseEntityMixin
-):
-    """Class describing Clever API EVSE binary sensor entities."""
-
-
-BINARY_SENSORS = [
-    CleverApiBinarySensorEvseEntityDescription(
-        key="IO",
-        name="Intelligent Opladning",
-        icon="mdi:radiobox-blank",
-        value_fn=lambda x: x.evse_info.data[0].smart_charging_is_enabled,
-        attrs={
-            "planned_depature": lambda x: None
-            if x.evse_info.data[0].smart_charging_is_enabled is False
-            else x.evse_info.data[
-                0
-            ].smart_charging_configuration.user_configuration.departure_time["time"],
-            "desired_range": lambda x: None
-            if x.evse_info.data[0].smart_charging_is_enabled is False
-            else x.evse_info.data[
-                0
-            ].smart_charging_configuration.user_configuration.desired_range[
-                "desiredRange"
-            ],
-            "configured_effect": lambda x: None
-            if x.evse_info.data[0].smart_charging_is_enabled is False
-            else x.evse_info.data[
-                0
-            ].smart_charging_configuration.user_configuration.configured_effect[
-                "phaseCount"
-            ],
-            "preheat_enabled": lambda x: None
-            if x.evse_info.data[0].smart_charging_is_enabled is False
-            else x.evse_info.data[
-                0
-            ].smart_charging_configuration.user_configuration.preheat_in_minutes
-            == 30,
-        },
-    ),
-]
+from .const import DOMAIN
+from .coordinator import CleverApiUpdateCoordinator
+from .entity import CleverApiEntity
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Setup Clever API binary sensors from config entry."""
-    evse_coordinator: CleverApiEvseUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    async_add_entities(
-        CleverApiEvseBinarySensorEntity(
-            coordinator=evse_coordinator,
-            description=description,
-        )
-        for description in BINARY_SENSORS
-    )
+    coordinator: CleverApiUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    if coordinator.data.home_installation is not None:
+        async_add_entities([CleverSmartChargingBinarySensor(coordinator)])
 
 
-class CleverApiEvseBinarySensorEntity(CleverApiEvseEntity, BinarySensorEntity):
-    """Representation of a Clever EVSE API binary sensor."""
+class CleverSmartChargingBinarySensor(CleverApiEntity, BinarySensorEntity):
+    """Whether intelligent charging is enabled for the home charger."""
 
-    entity_description: CleverApiBinarySensorEvseEntityDescription
+    _attr_name = "Intelligent charging"
+    _attr_translation_key = "intelligent_charging"
+    _attr_icon = "mdi:ev-station"
 
-    def __init__(
-        self,
-        coordinator: CleverApiEvseUpdateCoordinator,
-        description: CleverApiBinarySensorEvseEntityDescription,
-    ) -> None:
-        """Initiate Clever API binary sensor"""
+    def __init__(self, coordinator: CleverApiUpdateCoordinator) -> None:
         super().__init__(coordinator)
-
-        self.entity_description = description
-        self._attr_unique_id = f"{description.key}"
+        self._attr_unique_id = (
+            f"{coordinator.data.profile.customer_id}_intelligent_charging"
+        )
 
     @property
     def is_on(self) -> bool:
-        """Return binary sensor value."""
-        return self.entity_description.value_fn(self.coordinator.data)
+        profile = self.coordinator.data.home_charging_profile
+        if profile is not None:
+            return profile.enabled
+        installation = self.coordinator.data.home_installation
+        return bool(installation and installation.smart_charging.enabled)
 
     @property
-    def extra_state_attributes(self):
-        attr = {}
-        for key in self.entity_description.attrs:
-            attr[key] = self.entity_description.attrs[key](self.coordinator.data)
-
-        return attr
+    def extra_state_attributes(self) -> dict[str, Any]:
+        profile = self.coordinator.data.home_charging_profile
+        installation = self.coordinator.data.home_installation
+        settings = installation.smart_charging if installation else None
+        return {
+            "planned_departure": (
+                profile.departure_time
+                if profile
+                else settings.departure_time
+                if settings
+                else None
+            ),
+            "desired_range": (
+                profile.power_required
+                if profile
+                else settings.power_required
+                if settings
+                else None
+            ),
+            "configured_phase_count": settings.phase_count if settings else None,
+            "preheat_enabled": (
+                profile.preheat_minutes > 0
+                if profile
+                else bool(settings and settings.preheat_minutes > 0)
+            ),
+        }

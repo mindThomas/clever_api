@@ -1,101 +1,146 @@
-"""DataUpdateCoordinator for Clever API integration."""
+"""Data coordinator for the Clever API integration."""
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+import asyncio
+import time
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, LOGGER, CONF_BOX_ID, CONF_CONNECTOR_ID, CONF_SUBSCRIPTION_FEE
+from .clever.clever import CleverClient
+from .clever.exceptions import (
+    CleverApiError,
+    CleverAuthenticationError,
+    CleverConnectionError,
+)
+from .clever.models import (
+    ActiveTransaction,
+    ChargePointState,
+    ChargingProfile,
+    CleverApiData,
+    ConsumptionRecord,
+    EnergySurcharge,
+    Installation,
+    Profile,
+    summarize_consumption,
+)
+from .const import (
+    CONF_FIREBASE_UID,
+    CONF_REFRESH_TOKEN,
+    CONF_SUBSCRIPTION_FEE,
+    DOMAIN,
+    LOGGER,
+)
 
-from .clever.models import ModTransactions, Energitillaeg, EvseState, EvseInfo
-from .clever.clever import Evse, Subscription
+SLOW_REFRESH_SECONDS = 60 * 60
 
 
-@dataclass
-class CleverApiSubscriptionData:
-    """Clever API subscription data stored in DataUpdateCoordinator."""
-
-    transactions: ModTransactions
-    energitillaeg: Energitillaeg
-    sub_fee: float
-
-
-class CleverApiSubscriptionUpdateCoordinator(
-    DataUpdateCoordinator[CleverApiSubscriptionData]
-):
-    """Class to manage fetching data for Clever API subscription."""
-
-    config_entry = ConfigEntry
+class CleverApiUpdateCoordinator(DataUpdateCoordinator[CleverApiData]):
+    """Fetch slow REST data hourly and live Firestore data every minute."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialize coordinator."""
         self.config_entry = entry
-        self.sub = Subscription(
-            api_token=entry.data[CONF_API_KEY], session=async_get_clientsession(hass)
+        self.client = CleverClient(
+            async_get_clientsession(hass),
+            refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+            firebase_uid=entry.data.get(CONF_FIREBASE_UID),
+            token_update_callback=self._token_updated,
         )
-
+        self._slow_refresh_at = 0.0
+        self._slow: dict[str, Any] | None = None
         super().__init__(
             hass,
             LOGGER,
-            name=f"{DOMAIN}_subscription",
-            update_interval=timedelta(minutes=60),
-        )
-
-    async def _async_update_data(self) -> CleverApiSubscriptionData:
-        return CleverApiSubscriptionData(
-            transactions=await self.sub.get_transactions(),
-            energitillaeg=await self.sub.get_energitillaeg(),
-            sub_fee=self.config_entry.data[CONF_SUBSCRIPTION_FEE],
-        )
-
-
-@dataclass
-class CleverApiEvseData:
-    """Clever API EVSE data stored in DataUpdateCoordinator."""
-
-    transactions: ModTransactions
-    energitillaeg: Energitillaeg
-    sub_fee: float
-    evse_state: EvseState
-    evse_info: EvseInfo
-
-
-class CleverApiEvseUpdateCoordinator(DataUpdateCoordinator[CleverApiEvseData]):
-    """Class to manage fetching data for Clever API EVSE."""
-
-    config_entry = ConfigEntry
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialize coordinator."""
-        self.config_entry = entry
-        self.sub = Subscription(
-            api_token=entry.data[CONF_API_KEY], session=async_get_clientsession(hass)
-        )
-        self.evse = Evse(
-            api_token=entry.data[CONF_API_KEY],
-            box_id=entry.data[CONF_BOX_ID],
-            connector_id=entry.data[CONF_CONNECTOR_ID],
-            session=async_get_clientsession(hass),
-        )
-
-        super().__init__(
-            hass,
-            LOGGER,
-            name=f"{DOMAIN}_evse",
+            config_entry=entry,
+            name=DOMAIN,
             update_interval=timedelta(minutes=1),
         )
 
-    async def _async_update_data(self) -> CleverApiEvseData:
-        return CleverApiEvseData(
-            evse_state=await self.evse.get_evse_state(),
-            evse_info=await self.sub.get_evse_info(),
-            transactions=await self.sub.get_transactions(
-                box_id=self.config_entry.data[CONF_BOX_ID]
+    def _token_updated(self, refresh_token: str, firebase_uid: str) -> None:
+        if (
+            self.config_entry.data.get(CONF_REFRESH_TOKEN) == refresh_token
+            and self.config_entry.data.get(CONF_FIREBASE_UID) == firebase_uid
+        ):
+            return
+        data = dict(self.config_entry.data)
+        data[CONF_REFRESH_TOKEN] = refresh_token
+        data[CONF_FIREBASE_UID] = firebase_uid
+        self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+
+    async def async_refresh_configuration(self) -> None:
+        """Refresh REST configuration after a control request."""
+        self._slow_refresh_at = 0.0
+        await self.async_request_refresh()
+
+    async def _async_update_data(self) -> CleverApiData:
+        try:
+            if self._slow is None or time.monotonic() >= self._slow_refresh_at:
+                (
+                    profile_data,
+                    installation_data,
+                    consumption_data,
+                    surcharge_data,
+                    charging_profile_data,
+                ) = await asyncio.gather(
+                    self.client.get_profile(),
+                    self.client.get_installations(),
+                    self.client.get_consumption_history(),
+                    self.client.get_energy_surcharge(),
+                    self.client.get_charging_profiles(),
+                )
+                self._slow = {
+                    "profile": Profile.from_api(profile_data),
+                    "installations": tuple(
+                        Installation.from_api(item) for item in installation_data
+                    ),
+                    "records": [
+                        ConsumptionRecord.from_api(item) for item in consumption_data
+                    ],
+                    "surcharge": EnergySurcharge.from_api(surcharge_data),
+                    "charging_profiles": tuple(
+                        ChargingProfile.from_api(item) for item in charging_profile_data
+                    ),
+                }
+                self._slow_refresh_at = time.monotonic() + SLOW_REFRESH_SECONDS
+
+            chargepoint_data, transaction_data = await asyncio.gather(
+                self.client.get_home_chargepoints(),
+                self.client.get_active_transactions(),
+            )
+        except CleverAuthenticationError as error:
+            raise ConfigEntryAuthFailed("Clever authentication expired") from error
+        except (CleverConnectionError, CleverApiError) as error:
+            raise UpdateFailed(str(error)) from error
+
+        assert self._slow is not None
+        installations: tuple[Installation, ...] = self._slow["installations"]
+        charge_box_id = installations[0].charge_box_id if installations else None
+        local_now = dt_util.now()
+        month_start = local_now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        return CleverApiData(
+            profile=self._slow["profile"],
+            installations=installations,
+            charging_profiles=self._slow["charging_profiles"],
+            consumption=summarize_consumption(
+                self._slow["records"], dt_util.as_utc(month_start), charge_box_id
             ),
-            energitillaeg=await self.sub.get_energitillaeg(),
-            sub_fee=self.config_entry.data[CONF_SUBSCRIPTION_FEE],
+            surcharge=self._slow["surcharge"],
+            chargepoint_states=tuple(
+                ChargePointState.from_firestore(item) for item in chargepoint_data
+            ),
+            transactions=tuple(
+                ActiveTransaction.from_firestore(item) for item in transaction_data
+            ),
+            subscription_fee=float(
+                self.config_entry.data.get(CONF_SUBSCRIPTION_FEE, 0)
+            ),
         )

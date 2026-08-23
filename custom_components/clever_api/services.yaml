@@ -1,6 +1,6 @@
 enable_flex:
   name: Enable Intelligent Opladning
-  description: Enable Intelligent Opladning
+  description: Enable intelligent charging and update the charging profile.
   fields:
     depature_time:
       name: Depature Time
@@ -11,8 +11,8 @@ enable_flex:
         text:
           type: text
     desired_range:
-      name: Desired Range
-      description: Desired range in kWh
+      name: Required energy
+      description: Required energy in kWh.
       required: true
       example: 30
       selector:
@@ -24,8 +24,8 @@ enable_flex:
           mode: box
     phase_count:
       name: Phase Count
-      description: Number of phases used for charging
-      required: true
+      description: Deprecated compatibility field; Clever API v6 does not expose this setting.
+      required: false
       example: 3
       selector:
         number:
@@ -33,3 +33,7 @@ enable_flex:
           max: 3
           step: 1
           mode: box
+
+disable_flex:
+  name: Disable Intelligent Opladning
+  description: Disable intelligent charging for the home charging profile.
