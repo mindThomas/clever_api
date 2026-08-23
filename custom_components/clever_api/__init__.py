@@ -7,8 +7,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    CONF_CONFIG_ENTRY_ID,
     CONF_DEPT_TIME,
     CONF_DESIRED_RANGE,
     CONF_PHASE_COUNT,
@@ -23,6 +25,7 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
 
 SERVICE_ENABLE_FLEX_SCHEMA = vol.Schema(
     {
+        vol.Optional(CONF_CONFIG_ENTRY_ID): str,
         vol.Required(CONF_DEPT_TIME): vol.Match(r"^(?:[01]\d|2[0-3]):[0-5]\d$"),
         vol.Required(CONF_DESIRED_RANGE): vol.All(
             vol.Coerce(int), vol.Range(min=0, max=100)
@@ -35,16 +38,81 @@ SERVICE_ENABLE_FLEX_SCHEMA = vol.Schema(
     }
 )
 
+SERVICE_DISABLE_FLEX_SCHEMA = vol.Schema({vol.Optional(CONF_CONFIG_ENTRY_ID): str})
+
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Remove obsolete v1 tokens and require Firebase reauthentication."""
-    if entry.version >= 2:
+    """Migrate authentication data and entity unique IDs."""
+    if entry.version >= 3:
         return True
+    _migrate_entity_unique_ids(hass, entry)
     data = dict(entry.data)
-    for obsolete_key in ("api_key", "api_token", "url"):
-        data.pop(obsolete_key, None)
-    hass.config_entries.async_update_entry(entry, data=data, version=2)
+    if entry.version < 2:
+        for obsolete_key in ("api_key", "api_token", "url"):
+            data.pop(obsolete_key, None)
+    hass.config_entries.async_update_entry(entry, data=data, version=3)
     return True
+
+
+def _migrate_entity_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Keep existing entity IDs while adopting account-scoped unique IDs."""
+    customer_id = entry.data.get("user_id")
+    if not customer_id:
+        return
+
+    migrations: dict[tuple[str, str], str] = {
+        ("binary_sensor", "IO"): f"{customer_id}_intelligent_charging",
+        ("switch", "preheat"): f"{customer_id}_preheat",
+        ("switch", "skip_io"): f"{customer_id}_boost",
+    }
+    if not entry.data.get("box"):
+        migrations.update(
+            {
+                ("sensor", key): f"{customer_id}_{key}"
+                for key in ("kwh_this_month", "energi_tillaeg", "estimated_price")
+            }
+        )
+
+    registry = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        new_unique_id = migrations.get(
+            (registry_entry.domain, registry_entry.unique_id)
+        )
+        if new_unique_id is None:
+            continue
+        if (
+            registry.async_get_entity_id(registry_entry.domain, DOMAIN, new_unique_id)
+            is not None
+        ):
+            continue
+        registry.async_update_entity(
+            registry_entry.entity_id, new_unique_id=new_unique_id
+        )
+
+
+def _coordinator_for_call(
+    hass: HomeAssistant, call: ServiceCall
+) -> CleverApiUpdateCoordinator:
+    """Resolve the requested Clever account, or the only home-charger account."""
+    coordinators: dict[str, CleverApiUpdateCoordinator] = hass.data.get(DOMAIN, {})
+    if entry_id := call.data.get(CONF_CONFIG_ENTRY_ID):
+        coordinator = coordinators.get(entry_id)
+        if coordinator is None:
+            raise HomeAssistantError("The selected Clever account is unavailable")
+        return coordinator
+
+    home_coordinators = [
+        coordinator
+        for coordinator in coordinators.values()
+        if coordinator.data.home_charging_profile is not None
+    ]
+    if len(home_coordinators) == 1:
+        return home_coordinators[0]
+    if not home_coordinators:
+        raise HomeAssistantError("No Clever home charging profile is available")
+    raise HomeAssistantError(
+        "Multiple Clever home chargers are configured; select a Clever account"
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -60,6 +128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.services.has_service(DOMAIN, SERVICE_ENABLE_FLEX):
 
         async def enable_flex(call: ServiceCall) -> None:
+            coordinator = _coordinator_for_call(hass, call)
             profile = coordinator.data.home_charging_profile
             if profile is None:
                 raise HomeAssistantError("No Clever home charging profile is available")
@@ -75,6 +144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_refresh_configuration()
 
         async def disable_flex(call: ServiceCall) -> None:
+            coordinator = _coordinator_for_call(hass, call)
             profile = coordinator.data.home_charging_profile
             if profile is None:
                 raise HomeAssistantError("No Clever home charging profile is available")
@@ -86,7 +156,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(
             DOMAIN, SERVICE_ENABLE_FLEX, enable_flex, schema=SERVICE_ENABLE_FLEX_SCHEMA
         )
-        hass.services.async_register(DOMAIN, SERVICE_DISABLE_FLEX, disable_flex)
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_DISABLE_FLEX,
+            disable_flex,
+            schema=SERVICE_DISABLE_FLEX_SCHEMA,
+        )
 
     return True
 

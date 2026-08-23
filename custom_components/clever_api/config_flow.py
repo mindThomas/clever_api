@@ -52,7 +52,7 @@ def _credentials_schema(email: str | None = None) -> vol.Schema:
 class CleverApiConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle Clever configuration and Firebase reauthentication."""
 
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback

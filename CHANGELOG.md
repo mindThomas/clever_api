@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 (2026-08-24)
+---
+ - Preserve existing entity IDs when migrating legacy entries.
+ - Route control actions to a selected Clever account when multiple entries exist.
+
 ## 0.3.0 (2026-08-23)
 ---
  - Replace the retired email-link flow with Firebase email/password authentication and refresh-token rotation.
