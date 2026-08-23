@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -13,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -89,6 +90,109 @@ SENSORS = (
             if data.active_home_transaction
             else 0
         ),
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="session_target_energy",
+        translation_key="session_target_energy",
+        name="Target energy this charging session",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        value_fn=lambda data: (
+            data.active_home_transaction.target_energy_kwh
+            if data.active_home_transaction
+            else None
+        ),
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="session_progress",
+        translation_key="session_progress",
+        name="Charging session progress",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.active_home_transaction.progress_percent
+            if data.active_home_transaction
+            else None
+        ),
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="session_duration",
+        translation_key="session_duration",
+        name="Charging session duration",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        value_fn=lambda data: (
+            data.active_home_transaction.duration_seconds_at(datetime.now(UTC))
+            if data.active_home_transaction
+            else None
+        ),
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="session_average_power",
+        translation_key="session_average_power",
+        name="Average power this charging session",
+        device_class=SensorDeviceClass.POWER,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.active_home_transaction.average_power_kw_at(datetime.now(UTC))
+            if data.active_home_transaction
+            else None
+        ),
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="session_expected_completion",
+        translation_key="session_expected_completion",
+        name="Expected charging completion",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda data: (
+            data.active_home_transaction.expected_completion
+            if data.active_home_transaction
+            else None
+        ),
+        attributes_fn=lambda data: {
+            "charging_started": (
+                data.active_home_transaction.charging_start
+                if data.active_home_transaction
+                else None
+            ),
+            "planned_departure": (
+                data.active_home_transaction.planned_departure
+                if data.active_home_transaction
+                else None
+            ),
+            "postponed_until": (
+                data.active_home_transaction.postponed_until
+                if data.active_home_transaction
+                else None
+            ),
+        },
+        requires_home_charger=True,
+    ),
+    CleverSensorDescription(
+        key="vehicle_battery_level",
+        translation_key="vehicle_battery_level",
+        name="Vehicle battery level",
+        device_class=SensorDeviceClass.BATTERY,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.active_home_transaction.battery_level
+            if data.active_home_transaction
+            else None
+        ),
+        attributes_fn=lambda data: {
+            "charge_limit": (
+                data.active_home_transaction.charge_limit
+                if data.active_home_transaction
+                else None
+            )
+        },
         requires_home_charger=True,
     ),
     CleverSensorDescription(
