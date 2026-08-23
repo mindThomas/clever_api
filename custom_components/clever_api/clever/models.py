@@ -259,7 +259,10 @@ class ActiveTransaction:
     status: str
     consumed_wh: float
     timestamp: datetime | None
+    charging_start: datetime | None
     charging_end: datetime | None
+    smart_charging_flow: str | None
+    vehicle_state_of_charge: dict[str, Any] = field(default_factory=dict)
     charging_plan: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -270,13 +273,75 @@ class ActiveTransaction:
             status=str(data.get("cpmsChargingStatus") or "Unknown"),
             consumed_wh=float(data.get("consumedWh") or 0),
             timestamp=parse_datetime(data.get("timeStamp")),
+            charging_start=parse_datetime(data.get("chargingStart")),
             charging_end=parse_datetime(data.get("chargingEnd")),
+            smart_charging_flow=(
+                str(data["smartChargingFlow"])
+                if data.get("smartChargingFlow") is not None
+                else None
+            ),
+            vehicle_state_of_charge=data.get("vehicleStateOfCharge") or {},
             charging_plan=data.get("chargingPlan") or {},
         )
 
     @property
     def is_active(self) -> bool:
         return self.status.casefold() not in TERMINAL_TRANSACTION_STATES
+
+    @property
+    def target_energy_kwh(self) -> int | None:
+        """Return the planned energy delivery for this session."""
+        return _optional_int(self.charging_plan.get("powerRequiredInKwh"))
+
+    @property
+    def expected_completion(self) -> datetime | None:
+        """Return the plan's earliest expected completion time."""
+        return parse_datetime(self.charging_plan.get("earliestFinishedAt"))
+
+    @property
+    def planned_departure(self) -> datetime | None:
+        return parse_datetime(self.charging_plan.get("departureTime"))
+
+    @property
+    def postponed_until(self) -> datetime | None:
+        return parse_datetime(self.charging_plan.get("postponedUntil"))
+
+    @property
+    def battery_level(self) -> float | None:
+        charge_state = self.vehicle_state_of_charge.get("vehicleChargeState") or {}
+        return _optional_float(charge_state.get("batteryLevel"))
+
+    @property
+    def charge_limit(self) -> float | None:
+        charge_state = self.vehicle_state_of_charge.get("vehicleChargeState") or {}
+        return _optional_float(charge_state.get("chargeLimit"))
+
+    @property
+    def vehicle_is_plugged_in(self) -> bool | None:
+        charge_state = self.vehicle_state_of_charge.get("vehicleChargeState") or {}
+        value = charge_state.get("isPluggedIn")
+        return value if isinstance(value, bool) else None
+
+    def duration_seconds_at(self, now: datetime) -> float | None:
+        """Return elapsed connection/charging time at ``now``."""
+        if self.charging_start is None:
+            return None
+        end = self.charging_end or now
+        return max(0, (end - self.charging_start).total_seconds())
+
+    def average_power_kw_at(self, now: datetime) -> float | None:
+        """Return average session power; the API has no instantaneous power field."""
+        seconds = self.duration_seconds_at(now)
+        if not seconds:
+            return None
+        return round((self.consumed_wh / 1000) / (seconds / 3600), 3)
+
+    @property
+    def progress_percent(self) -> float | None:
+        target = self.target_energy_kwh
+        if not target:
+            return None
+        return round(min(100, self.consumed_wh / (target * 10)), 1)
 
     def is_boosted_at(self, now: datetime) -> bool:
         """Return whether a boost segment is active at ``now``."""
@@ -372,5 +437,14 @@ def _optional_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
