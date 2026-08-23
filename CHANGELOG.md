@@ -5,6 +5,11 @@
  - Expose active charging, vehicle connection, target energy, progress, duration, average power, expected completion, and vehicle battery level.
  - Document the observed Android mobile API and Firestore handles.
 
+## 0.3.2 (2026-08-24)
+---
+ - Preserve existing entity IDs when migrating legacy entries.
+ - Route control actions to a selected Clever account when multiple entries exist.
+
 ## 0.3.1 (2026-08-24)
 ---
  - Fix config-flow loading on Home Assistant 2026.6.

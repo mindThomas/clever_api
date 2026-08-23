@@ -2,6 +2,13 @@ enable_flex:
   name: Enable Intelligent Opladning
   description: Enable intelligent charging and update the charging profile.
   fields:
+    config_entry_id:
+      name: Clever account
+      description: Account to control. Optional when only one home charger is configured.
+      required: false
+      selector:
+        config_entry:
+          integration: clever_api
     depature_time:
       name: Depature Time
       description: Depature time in format hh:mm
@@ -37,3 +44,11 @@ enable_flex:
 disable_flex:
   name: Disable Intelligent Opladning
   description: Disable intelligent charging for the home charging profile.
+  fields:
+    config_entry_id:
+      name: Clever account
+      description: Account to control. Optional when only one home charger is configured.
+      required: false
+      selector:
+        config_entry:
+          integration: clever_api
