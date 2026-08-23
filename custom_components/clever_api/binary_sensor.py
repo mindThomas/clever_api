@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -21,7 +24,13 @@ async def async_setup_entry(
 ) -> None:
     coordinator: CleverApiUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     if coordinator.data.home_installation is not None:
-        async_add_entities([CleverSmartChargingBinarySensor(coordinator)])
+        async_add_entities(
+            [
+                CleverSmartChargingBinarySensor(coordinator),
+                CleverChargingBinarySensor(coordinator),
+                CleverVehicleConnectedBinarySensor(coordinator),
+            ]
+        )
 
 
 class CleverSmartChargingBinarySensor(CleverApiEntity, BinarySensorEntity):
@@ -72,3 +81,42 @@ class CleverSmartChargingBinarySensor(CleverApiEntity, BinarySensorEntity):
                 else bool(settings and settings.preheat_minutes > 0)
             ),
         }
+
+
+class CleverChargingBinarySensor(CleverApiEntity, BinarySensorEntity):
+    """Whether the home charger is actively charging."""
+
+    _attr_name = "Charging"
+    _attr_translation_key = "charging"
+    _attr_device_class = BinarySensorDeviceClass.BATTERY_CHARGING
+
+    def __init__(self, coordinator: CleverApiUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.data.profile.customer_id}_charging"
+
+    @property
+    def is_on(self) -> bool:
+        transaction = self.coordinator.data.active_home_transaction
+        return bool(transaction and transaction.status.casefold() == "charging")
+
+
+class CleverVehicleConnectedBinarySensor(CleverApiEntity, BinarySensorEntity):
+    """Whether a vehicle is connected to the home charger."""
+
+    _attr_name = "Vehicle connected"
+    _attr_translation_key = "vehicle_connected"
+    _attr_device_class = BinarySensorDeviceClass.PLUG
+
+    def __init__(self, coordinator: CleverApiUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.data.profile.customer_id}_vehicle_connected"
+        )
+
+    @property
+    def is_on(self) -> bool:
+        transaction = self.coordinator.data.active_home_transaction
+        if transaction is None:
+            return False
+        plugged_in = transaction.vehicle_is_plugged_in
+        return True if plugged_in is None else plugged_in
