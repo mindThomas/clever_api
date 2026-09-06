@@ -178,6 +178,7 @@ class ConsumptionSummary:
     kwh_this_month: float = 0
     kwh_this_month_box: float | None = None
     last_charge: datetime | None = None
+    month_start: datetime | None = None
 
 
 def summarize_consumption(
@@ -200,6 +201,7 @@ def summarize_consumption(
         kwh_this_month=round(total, 3),
         kwh_this_month_box=round(box_total, 3) if box_total is not None else None,
         last_charge=max(stops) if stops else None,
+        month_start=month_start,
     )
 
 

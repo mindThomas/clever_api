@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 (2026-09-06)
+---
+ - Report `last_reset` on the monthly energy sensors. Both are month-to-date totals that
+   drop to zero on the 1st; without `last_reset` Home Assistant recorded that drop as a
+   large negative delta in long-term statistics instead of a meter reset.
+
 ## 0.4.0 (2026-08-24)
 ---
  - Expose active charging, vehicle connection, target energy, progress, duration, average power, expected completion, and vehicle battery level.

@@ -28,6 +28,7 @@ from .entity import CleverApiEntity
 class CleverSensorDescription(SensorEntityDescription):
     value_fn: Callable[[CleverApiData], Any]
     attributes_fn: Callable[[CleverApiData], dict[str, Any]] | None = None
+    last_reset_fn: Callable[[CleverApiData], datetime | None] | None = None
     requires_home_charger: bool = False
 
 
@@ -41,6 +42,10 @@ SENSORS = (
         state_class=SensorStateClass.TOTAL,
         value_fn=lambda data: data.consumption.kwh_this_month,
         attributes_fn=lambda data: {"last_charge": data.consumption.last_charge},
+        # Clever reports a month-to-date total that drops to zero on the 1st.
+        # Without last_reset, long-term statistics book that drop as a large
+        # negative delta instead of a meter reset.
+        last_reset_fn=lambda data: data.consumption.month_start,
     ),
     CleverSensorDescription(
         key="energi_tillaeg",
@@ -76,6 +81,7 @@ SENSORS = (
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         state_class=SensorStateClass.TOTAL,
         value_fn=lambda data: data.consumption.kwh_this_month_box,
+        last_reset_fn=lambda data: data.consumption.month_start,
         requires_home_charger=True,
     ),
     CleverSensorDescription(
@@ -250,6 +256,12 @@ class CleverApiSensor(CleverApiEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def last_reset(self) -> datetime | None:
+        if self.entity_description.last_reset_fn is None:
+            return None
+        return self.entity_description.last_reset_fn(self.coordinator.data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

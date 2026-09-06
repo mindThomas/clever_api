@@ -36,6 +36,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(summary.kwh_this_month, 12.5)
         self.assertEqual(summary.kwh_this_month_box, 12.5)
         self.assertEqual(summary.last_charge, record.stop)
+        # Carried through so the monthly sensors can report last_reset.
+        self.assertEqual(summary.month_start, datetime(2026, 8, 1, tzinfo=UTC))
 
     def test_charging_profile_matches_installation(self) -> None:
         installation = Installation.from_api(
