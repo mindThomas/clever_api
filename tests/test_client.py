@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -44,6 +45,83 @@ class FakeSession:
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_market_requests_are_get_only(self):
+        session = FakeSession([FakeResponse(200, {"data": {"prices": []}}),
+                               FakeResponse(200, {"data": []})])
+        client = CleverClient(session)  # type: ignore[arg-type]
+        client._id_token = "test-token"
+        client._token_expires_at = float("inf")
+        await client.get_electricity_prices("test-address", date(2026, 11, 24), date(2026, 11, 25))
+        await client.get_historical_energy_surcharges(date(2024, 1, 1), date(2026, 11, 24))
+        self.assertTrue(all(method == "GET" for method, _, _ in session.requests))
+        self.assertTrue(session.requests[0][1].endswith("electricity-pricing/app-price"))
+        self.assertEqual(session.requests[0][2]["params"],
+                         {"darReferenceId": "test-address", "from": "2026-11-24", "to": "2026-11-25"})
+        self.assertTrue(session.requests[1][1].endswith("energysurcharge/historical"))
+        self.assertEqual(session.requests[1][2]["params"],
+                         {"startYear": 2024, "startMonth": 1, "endYear": 2026, "endMonth": 11})
+
+    async def test_invalid_market_dates_do_not_send_requests(self):
+        session = FakeSession([])
+        client = CleverClient(session)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            await client.get_electricity_prices("test", date(2026, 11, 25), date(2026, 11, 24))
+        with self.assertRaises(ValueError):
+            await client.get_historical_energy_surcharges(date(2026, 11, 25), date(2026, 11, 24))
+        with self.assertRaises(TypeError):
+            await client.get_electricity_prices("test", datetime(2026, 11, 24), date(2026, 11, 25))
+        self.assertEqual(session.requests, [])
+
+    async def test_power_engagements_are_read_only(self) -> None:
+        agreements = [{"powerMeterEngagementInfos": [{"gsrn": "test-meter"}]}]
+        session = FakeSession([FakeResponse(200, {"data": agreements})])
+        client = CleverClient(session)  # type: ignore[arg-type]
+        client._id_token = "test-token"
+        client._token_expires_at = float("inf")
+        self.assertEqual(await client.get_power_engagements(), agreements)
+        method, url, _ = session.requests[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(url.endswith("/powerconsumption/powerEngagements"))
+
+    async def test_power_consumption_periods_and_calendar_date(self) -> None:
+        for period in ("daily", "monthly", "yearly"):
+            with self.subTest(period=period):
+                payload = {
+                    "totalConsumption": {
+                        "totalPowerMeterkWh": 23.44,
+                        "totalChargePointkWh": 6.105,
+                        "powerConsumptionPrPeriod": [],
+                    }
+                }
+                session = FakeSession([FakeResponse(200, {"data": payload})])
+                client = CleverClient(session)  # type: ignore[arg-type]
+                client._id_token = "test-token"
+                client._token_expires_at = float("inf")
+                result = await client.get_power_consumption(
+                    "test/meter", date(2026, 11, 22), period
+                )
+                self.assertEqual(result, payload)
+                method, url, kwargs = session.requests[0]
+                self.assertEqual(method, "GET")
+                self.assertTrue(url.endswith(f"/{period}/gsnr/test%2Fmeter"))
+                self.assertEqual(kwargs["params"], {"startDate": "2026-11-22"})
+                totals = result["totalConsumption"]
+                self.assertAlmostEqual(
+                    totals["totalPowerMeterkWh"] - totals["totalChargePointkWh"],
+                    17.335,
+                )
+
+    async def test_invalid_power_parameters_send_no_requests(self) -> None:
+        session = FakeSession([])
+        client = CleverClient(session)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            await client.get_power_consumption("test", date(2026, 11, 22), "bad")
+        with self.assertRaises(ValueError):
+            await client.get_power_consumption(" ", date(2026, 11, 22))
+        with self.assertRaises(TypeError):
+            await client.get_power_consumption("test", datetime(2026, 11, 22))
+        self.assertEqual(session.requests, [])
+
     async def test_login_and_authenticated_profile_request(self) -> None:
         session = FakeSession(
             [

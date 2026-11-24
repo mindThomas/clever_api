@@ -223,6 +223,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: CleverApiUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    from .power_sensor import async_setup_power_sensors
+
+    await async_setup_power_sensors(coordinator, async_add_entities)
+    from .market_sensor import async_setup_market_sensors
+
+    await async_setup_market_sensors(coordinator, async_add_entities)
     has_home_charger = coordinator.data.home_installation is not None
     async_add_entities(
         CleverApiSensor(coordinator, description)
